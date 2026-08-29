@@ -146,11 +146,19 @@ void run_fixed() {
     Dreo dreo;
     auto report = load_fixture("full_report");
     dreo.handle_datapoints_(report.data(), report.size());
-    require(find_dp(dreo, 4) != nullptr && find_dp(dreo, 4)->value_int == 1, "full report lost dp4");
-    require(find_dp(dreo, 12) != nullptr && find_dp(dreo, 12)->value_int == 3, "full report lost dp12");
-    require(find_dp(dreo, 14) != nullptr && find_dp(dreo, 14)->value_int == 87, "full report lost dp14");
-    require(find_dp(dreo, 20) != nullptr && find_dp(dreo, 20)->value_int == 61, "full report lost dp20");
-    require(find_dp(dreo, 28) != nullptr && find_dp(dreo, 28)->value_int == 0, "full report lost dp28");
+    const std::vector<std::pair<uint8_t, int32_t>> expected{{4, 1},  {5, 7},  {6, 1},  {7, 1},  {8, 70},
+                                                            {9, 0},  {10, 0}, {12, 3}, {13, 0}, {14, 87},
+                                                            {15, 0}, {16, 0}, {17, 0}, {18, 0}, {19, 0},
+                                                            {20, 61}, {22, 0}, {23, 0}, {25, 0}, {26, 0},
+                                                            {27, 0}, {28, 0}};
+    for (const auto &[id, value] : expected) {
+      auto *datapoint = find_dp(dreo, id);
+      require(datapoint != nullptr, "full report lost a supported datapoint after dp4");
+      if (datapoint->type == DreoDatapointType::INTEGER)
+        require(datapoint->value_int == value, "full report stored a wrong integer value");
+      else if (datapoint->type == DreoDatapointType::BOOLEAN)
+        require(datapoint->value_bool == static_cast<bool>(value), "full report stored a wrong boolean value");
+    }
     require(find_dp(dreo, 11) == nullptr, "unknown string datapoint was published");
   }
   {
@@ -169,16 +177,22 @@ void run_fixed() {
     require(dreo.command_queue_.back().payload == std::vector<uint8_t>({60, 0, 2, 0, 4, 1, 2, 3, 4}),
             "integer write did not default to four bytes");
   }
+  const std::vector<uint8_t> encoded_value{1, 2, 3, 4};
   for (uint8_t width : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
     Dreo dreo;
     auto observed = integer_dp(61, std::vector<uint8_t>(width, 0));
     dreo.handle_datapoints_(observed.data(), observed.size());
     dreo.set_integer_datapoint_value(61, 0x01020304);
-    require(dreo.command_queue_.back().payload.size() == static_cast<size_t>(5 + width),
-            "normal setter ignored observed width");
+    const auto &normal = dreo.command_queue_.back().payload;
+    require(normal.size() == static_cast<size_t>(5 + width), "normal setter ignored observed width");
+    const std::vector<uint8_t> expected(encoded_value.end() - width, encoded_value.end());
+    require(std::vector<uint8_t>(normal.end() - width, normal.end()) == expected,
+            "normal setter did not emit the expected big-endian suffix");
     dreo.force_set_integer_datapoint_value(61, 0x01020304);
-    require(dreo.command_queue_.back().payload.size() == static_cast<size_t>(5 + width),
-            "forced setter ignored observed width");
+    const auto &forced = dreo.command_queue_.back().payload;
+    require(forced.size() == static_cast<size_t>(5 + width), "forced setter ignored observed width");
+    require(std::vector<uint8_t>(forced.end() - width, forced.end()) == expected,
+            "forced setter did not emit the expected big-endian suffix");
   }
 
   {

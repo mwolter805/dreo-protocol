@@ -37,11 +37,14 @@ try:
 except _StopImport:
     pass
 
+FIXED = "--fixed" in sys.argv
+
 
 def integer_dp(value: bytes) -> bytes:
     return bytes((1, 1, 2)) + len(value).to_bytes(2, "big") + value
 
 
+@unittest.skipIf(FIXED, "unmodified-source assertions")
 class DecoderBaselineTest(unittest.TestCase):
     def test_one_and_four_byte_integer_positive_controls(self):
         self.assertEqual(decode.parse_dp(integer_dp(b"\x80"))[0].value, -128)
@@ -55,7 +58,7 @@ class DecoderBaselineTest(unittest.TestCase):
             decode.parse_dp(integer_dp(b"\x80\x00"))
 
 
-@unittest.skipUnless("--fixed" in sys.argv, "fixed-source assertions")
+@unittest.skipUnless(FIXED, "fixed-source assertions")
 class DecoderFixedTest(unittest.TestCase):
     def test_signed_integer_boundaries(self):
         cases = (
