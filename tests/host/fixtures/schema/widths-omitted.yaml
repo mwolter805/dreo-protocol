@@ -1,0 +1,31 @@
+esphome:
+  name: dreo-schema-widths-omitted
+
+external_components:
+  - source: ../../../../components
+    components: [dreo]
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+
+logger:
+  baud_rate: 0
+
+api:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "schema-test"
+  password: "not-a-real-password"
+
+uart:
+  id: mcu_uart
+  tx_pin: GPIO0
+  rx_pin: GPIO1
+  baud_rate: 115200
+
+dreo:
+  uart_id: mcu_uart

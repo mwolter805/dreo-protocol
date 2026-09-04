@@ -9,6 +9,8 @@ CODEOWNERS = ["@davidc"]
 
 CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS = "ignore_mcu_update_on_datapoints"
 CONF_COMMAND_DATAPOINT_MARKER = "command_datapoint_marker"
+CONF_INTEGER_COMMAND_WIDTHS = "integer_command_widths"
+CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF = "allow_sub_entity_control_while_off"
 CONF_COMMAND_AUTHORIZER = "command_authorizer"
 CONF_TRANSITION_DATAPOINTS = "transition_datapoints"
 
@@ -72,6 +74,10 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(Dreo),
             cv.Optional(CONF_COMMAND_DATAPOINT_MARKER, default=0): cv.uint8_t,
+            cv.Optional(CONF_INTEGER_COMMAND_WIDTHS, default={}): cv.Schema(
+                {cv.uint8_t: cv.one_of(1, 2, 4, int=True)}
+            ),
+            cv.Optional(CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF, default=False): cv.boolean,
             cv.Optional(CONF_COMMAND_AUTHORIZER): cv.lambda_,
             cv.Optional(CONF_TRANSITION_DATAPOINTS): cv.ensure_list(cv.uint8_t),
             cv.Optional(CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS): cv.ensure_list(
@@ -101,6 +107,13 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
     cg.add(var.set_command_datapoint_marker(config[CONF_COMMAND_DATAPOINT_MARKER]))
+    for datapoint_id, width in config[CONF_INTEGER_COMMAND_WIDTHS].items():
+        cg.add(var.set_integer_command_width(datapoint_id, width))
+    cg.add(
+        var.set_allow_sub_entity_control_while_off(
+            config[CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF]
+        )
+    )
     if CONF_COMMAND_AUTHORIZER in config:
         authorizer = await cg.process_lambda(
             config[CONF_COMMAND_AUTHORIZER],

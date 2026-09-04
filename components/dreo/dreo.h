@@ -105,6 +105,11 @@ class Dreo final : public Component, public uart::UARTDevice {
   bool request_full_datapoint_report_once();
   optional<bool> get_boolean_datapoint_value(uint8_t datapoint_id);
   bool is_datapoint_pending(uint8_t datapoint_id) const;
+  void set_integer_command_width(uint8_t datapoint_id, uint8_t width);
+  void set_allow_sub_entity_control_while_off(bool allow) {
+    this->allow_sub_entity_control_while_off_ = allow;
+  }
+  bool allow_sub_entity_control_while_off() const { return this->allow_sub_entity_control_while_off_; }
   void set_command_authorizer(const std::function<bool(const DreoDatapointCommand &)> &authorizer) {
     this->command_authorizer_ = authorizer;
   }
@@ -125,6 +130,7 @@ class Dreo final : public Component, public uart::UARTDevice {
   void handle_char_(uint8_t c);
   void handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report = false);
   optional<DreoDatapoint> get_datapoint_(uint8_t datapoint_id);
+  optional<uint8_t> integer_command_width_(uint8_t datapoint_id) const;
   bool validate_message_();
 
   void handle_command_(uint8_t command, uint8_t version, uint8_t sequence, const uint8_t *buffer, size_t len);
@@ -163,6 +169,8 @@ class Dreo final : public Component, public uart::UARTDevice {
   CallbackManager<void()> initialized_callback_{};
   uint8_t sequence_ = 0;
   uint8_t command_datapoint_marker_ = 0;
+  std::vector<std::pair<uint8_t, uint8_t>> integer_command_widths_{};
+  bool allow_sub_entity_control_while_off_{false};
   std::function<bool(const DreoDatapointCommand &)> command_authorizer_{};
   std::vector<uint8_t> transition_datapoints_{};
   std::vector<DreoPendingTransition> pending_transitions_{};

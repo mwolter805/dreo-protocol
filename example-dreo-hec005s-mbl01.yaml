@@ -52,21 +52,24 @@ dreo:
   transition_datapoints: [1, 3]
   command_authorizer: |-
     // Fan power and the off timer remain available while fan state is unknown,
-    // off, or transitioning. Every other command requires confirmed power.
+    // off, or transitioning.
     if (command.datapoint_id == 1 || command.datapoint_id == 17)
       return true;
     auto power = id(dreo_hub).get_boolean_datapoint_value(1);
-    if (!power.has_value() || id(dreo_hub).is_datapoint_pending(1) || !*power)
-      return false;
 
-    // Mist power remains available for recovery. Its dependent controls need
-    // a confirmed on report and remain blocked throughout a transition.
-    if (command.datapoint_id == 3)
-      return true;
+    // Mist settings require both parent states to be known and settled. The
+    // opt-in may relax only a confirmed off state, never unknown or pending.
     if (command.datapoint_id == 6 || command.datapoint_id == 7 || command.datapoint_id == 8) {
       auto mist = id(dreo_hub).get_boolean_datapoint_value(3);
-      return mist.has_value() && !id(dreo_hub).is_datapoint_pending(3) && *mist;
+      if (!power.has_value() || id(dreo_hub).is_datapoint_pending(1) ||
+          !mist.has_value() || id(dreo_hub).is_datapoint_pending(3))
+        return false;
+      return id(dreo_hub).allow_sub_entity_control_while_off() || (*power && *mist);
     }
+
+    // Every other command, including mist power, requires confirmed fan power.
+    if (!power.has_value() || id(dreo_hub).is_datapoint_pending(1) || !*power)
+      return false;
     return true;
 
 script:

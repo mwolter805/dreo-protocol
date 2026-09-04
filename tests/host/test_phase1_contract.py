@@ -57,6 +57,7 @@ class Phase1SourceContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.yaml = (ROOT / "example-dreo-hec005s-mbl01.yaml").read_text()
+        cls.schema = (ROOT / "components/dreo/__init__.py").read_text()
         cls.header = (ROOT / "components/dreo/dreo.h").read_text()
         cls.core = (ROOT / "components/dreo/dreo.cpp").read_text()
 
@@ -85,6 +86,20 @@ interval:
 """
         self.assertIn("forbidden candidate status method", wifi_policy_errors(mutated))
         self.assertIn("forbidden periodic sender", wifi_policy_errors(mutated))
+
+    def test_off_state_subordinate_policy_is_opt_in_and_product_owned(self):
+        self.assertNotIn("allow_sub_entity_control_while_off:", self.yaml)
+        self.assertIn(
+            "cv.Optional(CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF, default=False)",
+            self.schema,
+        )
+        authorizer = self.yaml.split("command_authorizer: |-", 1)[1].split("\n\nscript:", 1)[0]
+        self.assertIn("command.datapoint_id == 6", authorizer)
+        self.assertIn("command.datapoint_id == 7", authorizer)
+        self.assertIn("command.datapoint_id == 8", authorizer)
+        self.assertIn("is_datapoint_pending(1)", authorizer)
+        self.assertIn("is_datapoint_pending(3)", authorizer)
+        self.assertIn("allow_sub_entity_control_while_off()", authorizer)
 
     def test_named_status_methods_use_one_exact_private_helper(self):
         declarations = (

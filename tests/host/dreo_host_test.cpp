@@ -142,14 +142,15 @@ void configure_hec_guard(Dreo &dreo) {
     if (command.datapoint_id == 1 || command.datapoint_id == 17)
       return true;
     auto power = parent->get_boolean_datapoint_value(1);
-    if (!power.has_value() || parent->is_datapoint_pending(1) || !*power)
-      return false;
-    if (command.datapoint_id == 3)
-      return true;
     if (command.datapoint_id == 6 || command.datapoint_id == 7 || command.datapoint_id == 8) {
       auto mist = parent->get_boolean_datapoint_value(3);
-      return mist.has_value() && !parent->is_datapoint_pending(3) && *mist;
+      if (!power.has_value() || parent->is_datapoint_pending(1) || !mist.has_value() ||
+          parent->is_datapoint_pending(3))
+        return false;
+      return parent->allow_sub_entity_control_while_off() || (*power && *mist);
     }
+    if (!power.has_value() || parent->is_datapoint_pending(1) || !*power)
+      return false;
     return true;
   });
 }
@@ -280,6 +281,24 @@ void test_core_parser_and_writer() {
             "integer write did not default to four bytes");
   }
   const std::vector<uint8_t> encoded_value{1, 2, 3, 4};
+  for (uint8_t width : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
+    Dreo before_report;
+    before_report.set_integer_command_width(62, width);
+    before_report.set_integer_datapoint_value(62, 0x01020304);
+    const std::vector<uint8_t> expected(encoded_value.end() - width, encoded_value.end());
+    require(before_report.command_queue_.back().payload ==
+                command_payload(62, 0, DreoDatapointType::INTEGER, expected),
+            "configured integer width was not applied before a report");
+
+    Dreo after_report;
+    after_report.set_integer_command_width(63, width);
+    auto observed = integer_dp(63, {0, 0, 0, 0});
+    after_report.handle_datapoints_(observed.data(), observed.size());
+    after_report.set_integer_datapoint_value(63, 0x01020304);
+    require(after_report.command_queue_.back().payload ==
+                command_payload(63, 0, DreoDatapointType::INTEGER, expected),
+            "configured integer width did not override a conflicting report width");
+  }
   for (uint8_t width : {uint8_t{1}, uint8_t{2}, uint8_t{4}}) {
     Dreo dreo;
     auto observed = integer_dp(61, std::vector<uint8_t>(width, 0));
@@ -619,6 +638,74 @@ void test_guard() {
     require(dreo.command_queue_.size() == 1, "combined fan call emitted cached fields during power transition");
     require(dreo.command_queue_[0].payload == command_payload(1, 1, DreoDatapointType::BOOLEAN, {1}),
             "combined fan call did not emit exact power-only frame");
+  }
+}
+
+void test_subordinate_control_policy() {
+  for (bool allow_while_off : {false, true}) {
+    for (bool power_on : {false, true}) {
+      for (bool mist_on : {false, true}) {
+        Dreo dreo;
+        configure_hec_guard(dreo);
+        dreo.set_allow_sub_entity_control_while_off(allow_while_off);
+        std::vector<uint8_t> state;
+        append(state, boolean_dp(1, power_on));
+        append(state, boolean_dp(3, mist_on));
+        dreo.handle_datapoints_(state.data(), state.size());
+        const bool settings_allowed = allow_while_off || (power_on && mist_on);
+        for (uint8_t id : {uint8_t{6}, uint8_t{7}, uint8_t{8}})
+          require(dreo.force_set_integer_datapoint_value(id, 1) == settings_allowed,
+                  "subordinate policy returned the wrong confirmed-state result");
+        require(dreo.force_set_enum_datapoint_value(4, 1) == power_on,
+                "subordinate policy changed an unrelated datapoint result");
+      }
+    }
+  }
+
+  {
+    Dreo unknown;
+    configure_hec_guard(unknown);
+    unknown.set_allow_sub_entity_control_while_off(true);
+    require(!unknown.force_set_integer_datapoint_value(6, 1), "unknown parents did not fail closed");
+    auto power_only = boolean_dp(1, true);
+    unknown.handle_datapoints_(power_only.data(), power_only.size());
+    require(!unknown.force_set_integer_datapoint_value(6, 1), "unknown mist state did not fail closed");
+  }
+  {
+    Dreo pending_power;
+    configure_hec_guard(pending_power);
+    pending_power.set_allow_sub_entity_control_while_off(true);
+    std::vector<uint8_t> state;
+    append(state, boolean_dp(1, false));
+    append(state, boolean_dp(3, false));
+    pending_power.handle_datapoints_(state.data(), state.size());
+    require(pending_power.force_set_boolean_datapoint_value(1, true), "power transition setup was rejected");
+    require(!pending_power.force_set_integer_datapoint_value(6, 1), "pending power did not fail closed");
+  }
+  {
+    Dreo pending_mist;
+    configure_hec_guard(pending_mist);
+    pending_mist.set_allow_sub_entity_control_while_off(true);
+    std::vector<uint8_t> state;
+    append(state, boolean_dp(1, true));
+    append(state, boolean_dp(3, false));
+    pending_mist.handle_datapoints_(state.data(), state.size());
+    require(pending_mist.force_set_boolean_datapoint_value(3, true), "mist transition setup was rejected");
+    require(!pending_mist.force_set_integer_datapoint_value(6, 1), "pending mist did not fail closed");
+  }
+  {
+    Dreo toggled;
+    configure_hec_guard(toggled);
+    toggled.set_allow_sub_entity_control_while_off(true);
+    std::vector<uint8_t> state;
+    append(state, boolean_dp(1, false));
+    append(state, boolean_dp(3, false));
+    toggled.handle_datapoints_(state.data(), state.size());
+    require(toggled.force_set_integer_datapoint_value(6, 2), "enabled policy rejected confirmed-off setting");
+    const size_t queued = toggled.command_queue_.size();
+    toggled.set_allow_sub_entity_control_while_off(false);
+    require(!toggled.force_set_integer_datapoint_value(6, 3), "disabled policy did not restore rejection");
+    require(toggled.command_queue_.size() == queued, "disabled policy changed or queued prior state");
   }
 }
 
@@ -1018,6 +1105,7 @@ void run_fixed() {
   test_text();
   test_lock();
   test_guard();
+  test_subordinate_control_policy();
   test_existing_platform_type_safety();
   test_masked_binary_sensor_and_number_clamp();
   test_reconciliation_scheduler();

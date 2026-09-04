@@ -44,6 +44,12 @@ void Dreo::loop() {
 
 void Dreo::dump_config() {
   ESP_LOGCONFIG(TAG, "Dreo:");
+  for (const auto &entry : this->integer_command_widths_) {
+    ESP_LOGCONFIG(TAG, "  Datapoint %u integer command width: %u", entry.first, entry.second);
+    (void) entry;
+  }
+  ESP_LOGCONFIG(TAG, "  Allow subordinate controls while off: %s",
+                YESNO(this->allow_sub_entity_control_while_off_));
   if (this->init_state_ != DreoInitState::INIT_DONE) {
     if (this->init_failed_) {
       ESP_LOGCONFIG(TAG, "  Initialization failed. Current init_state: %u", static_cast<uint8_t>(this->init_state_));
@@ -650,6 +656,24 @@ bool Dreo::is_datapoint_pending(uint8_t datapoint_id) const {
   return false;
 }
 
+void Dreo::set_integer_command_width(uint8_t datapoint_id, uint8_t width) {
+  for (auto &entry : this->integer_command_widths_) {
+    if (entry.first == datapoint_id) {
+      entry.second = width;
+      return;
+    }
+  }
+  this->integer_command_widths_.emplace_back(datapoint_id, width);
+}
+
+optional<uint8_t> Dreo::integer_command_width_(uint8_t datapoint_id) const {
+  for (const auto &entry : this->integer_command_widths_) {
+    if (entry.first == datapoint_id)
+      return entry.second;
+  }
+  return {};
+}
+
 bool Dreo::set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType datapoint_type,
                                         const uint32_t value, uint8_t length, bool forced) {
   ESP_LOGD(TAG, "Setting datapoint %u to %" PRIu32, datapoint_id, value);
@@ -660,9 +684,6 @@ bool Dreo::set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType 
     ESP_LOGE(TAG, "Attempt to set datapoint %u with incorrect type", datapoint_id);
     return false;
   } else {
-    if (datapoint_type == DreoDatapointType::INTEGER)
-      length = datapoint->len;
-
     bool unchanged = false;
     switch (datapoint_type) {
       case DreoDatapointType::BOOLEAN:
@@ -681,6 +702,14 @@ bool Dreo::set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType 
       ESP_LOGV(TAG, "Not sending unchanged value");
       return true;
     }
+  }
+
+  if (datapoint_type == DreoDatapointType::INTEGER) {
+    auto configured = this->integer_command_width_(datapoint_id);
+    if (configured.has_value())
+      length = *configured;
+    else if (datapoint.has_value())
+      length = datapoint->len;
   }
 
   std::vector<uint8_t> data;

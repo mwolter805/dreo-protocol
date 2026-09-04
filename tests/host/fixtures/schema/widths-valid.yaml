@@ -1,0 +1,8 @@
+packages:
+  base: !include widths-omitted.yaml
+
+dreo:
+  integer_command_widths:
+    6: 1
+    7: 2
+    8: 4
