@@ -10,10 +10,13 @@ inline uint32_t encode_uint32(uint8_t byte0, uint8_t byte1, uint8_t byte2, uint8
          (static_cast<uint32_t>(byte2) << 8) | static_cast<uint32_t>(byte3);
 }
 
-inline uint32_t millis() {
-  static uint32_t now = 1000;
-  return now += 1000;
+inline uint32_t &millis_storage() {
+  static uint32_t now = 0;
+  return now;
 }
+inline uint32_t millis() { return millis_storage(); }
+inline void set_millis(uint32_t now) { millis_storage() = now; }
+inline void advance_millis(uint32_t amount) { millis_storage() += amount; }
 
 constexpr size_t format_hex_pretty_size(size_t size) { return size * 3 + 1; }
 inline const char *format_hex_pretty_to(char *buffer, const uint8_t *, size_t) {

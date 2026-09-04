@@ -22,9 +22,15 @@ although I haven't tested the fan functionality - although that should be fine
 |------------|-------|---------|--------|--------|
 | DR-HTF001S | Tower | -       | | Untested, but I believe this is an earlier version of HTF018S. Reports welcome. |
 | DR-HTF004S | Tower | MBL02   | | Uses a different protocol, will not work. See [dreo-cloudcutter](https://github.com/ouaibe/dreo-cloudcutter) instead. |
+| DR-HEC005S | Tower fan and humidifier | MBL01 (original) | [example-dreo-hec005s-mbl01.yaml](example-dreo-hec005s-mbl01.yaml) | Installed and verified on the original MBL01 module. |
 | DR-HTF018S | Tower | MBL01 (original) | [example-dreo-htf018s-mbl01.yaml](example-dreo-htf018s-mbl01.yaml) | Tested ESPhome installs okay, not tested fan functionality. Reports welcome. |
 | DR-HTF018S | Tower | ESP32C3 | [example-dreo-htf018s-esp32c3.yaml](example-dreo-htf018s-esp32c3.yaml) | Tested, works perfectly. |
 | DR-HTF024S | Tower | MBL01 (original) | [example-dreo-htf024s-mbl01.yaml](example-dreo-htf024s-mbl01.yaml) | Untested but [may work](https://github.com/davidc/dreo-protocol/issues/1). |
+
+The DR-HEC005S example includes its datapoint-backed RGB/effect light, validated humidity-threshold text, child lock,
+and a model command policy that blocks state-dependent writes until the fan confirms the required power state.
+It also drives the physical Wi-Fi icon from connection state: flashing after five seconds without Wi-Fi, off while
+Wi-Fi is connected without a state-subscribing ESPHome API client, and solid while such a client is connected.
 
 Please report back successes or failures. Please be careful and always ensure you have a way to restore the original firmware
 if needed (e.g. UART), I accept no responsibility for bricked devices!

@@ -11,13 +11,14 @@ class DreoBinarySensor final : public binary_sensor::BinarySensor, public Compon
   void setup() override;
   void dump_config() override;
   void set_sensor_id(uint8_t sensor_id) { this->sensor_id_ = sensor_id; }
+  void set_bitmask(uint32_t bitmask) { this->bitmask_ = bitmask; }
 
   void set_dreo_parent(Dreo *parent) { this->parent_ = parent; }
 
  protected:
   Dreo *parent_;
   uint8_t sensor_id_{0};
+  optional<uint32_t> bitmask_{};
 };
 
 }  // namespace esphome::dreo
-

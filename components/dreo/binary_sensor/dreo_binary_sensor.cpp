@@ -13,10 +13,13 @@ void DreoBinarySensor::setup() {
         value = datapoint.value_bool;
         break;
       case DreoDatapointType::INTEGER:
-        value = datapoint.value_int != 0;
+        value = this->bitmask_.has_value()
+                    ? (static_cast<uint32_t>(datapoint.value_int) & *this->bitmask_) != 0
+                    : datapoint.value_int != 0;
         break;
       case DreoDatapointType::ENUM:
-        value = datapoint.value_enum != 0;
+        value = this->bitmask_.has_value() ? (datapoint.value_enum & *this->bitmask_) != 0
+                                          : datapoint.value_enum != 0;
         break;
       default:
         ESP_LOGW(TAG, "Reported type (%d) is not supported by binary sensor", static_cast<int>(datapoint.type));

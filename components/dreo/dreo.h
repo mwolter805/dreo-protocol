@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <cinttypes>
+#include <string>
 #include <vector>
 
 #include "esphome/core/component.h"
@@ -15,7 +16,7 @@ enum class DreoDatapointType : uint8_t {
   // RAW = 0x00,      // variable length
   BOOLEAN = 0x01,  // 1 byte (0/1)
   INTEGER = 0x02,  // 1/2/4 bytes
-  // STRING = 0x03,   // variable length
+  STRING = 0x03,   // variable length
   ENUM = 0x04,     // 1 byte
   // BITMASK = 0x05,  // 1/2/4 bytes
 };
@@ -30,6 +31,18 @@ struct DreoDatapoint {
     uint32_t value_uint;
     uint8_t value_enum;
   };
+  std::string value_string;
+};
+
+struct DreoDatapointCommand {
+  uint8_t datapoint_id;
+  DreoDatapointType type;
+  uint32_t value_uint{0};
+  std::string value_string;
+};
+
+struct DreoPendingTransition {
+  DreoDatapointCommand command;
 };
 
 struct DreoDatapointListener {
@@ -58,9 +71,17 @@ enum class DreoInitState : uint8_t {
   INIT_DONE,
 };
 
+enum class DreoReconciliationRoute : uint8_t {
+  NONE = 0,
+  NOTIFICATION,
+  TRANSITION,
+};
+
 struct DreoCommand {
   DreoCommandType cmd;
   std::vector<uint8_t> payload;
+  DreoReconciliationRoute reconciliation_route{DreoReconciliationRoute::NONE};
+  bool diagnostic_full_report{false};
 };
 
 class Dreo final : public Component, public uart::UARTDevice {
@@ -70,12 +91,24 @@ class Dreo final : public Component, public uart::UARTDevice {
   void loop() override;
   void dump_config() override;
   void register_listener(uint8_t datapoint_id, const std::function<void(DreoDatapoint)> &func);
-  void set_boolean_datapoint_value(uint8_t datapoint_id, bool value);
-  void set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value);
-  void set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value);
-  void force_set_boolean_datapoint_value(uint8_t datapoint_id, bool value);
-  void force_set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value);
-  void force_set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value);
+  bool set_boolean_datapoint_value(uint8_t datapoint_id, bool value);
+  bool set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value);
+  bool set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value);
+  bool set_string_datapoint_value(uint8_t datapoint_id, const std::string &value);
+  bool force_set_boolean_datapoint_value(uint8_t datapoint_id, bool value);
+  bool force_set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value);
+  bool force_set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value);
+  bool force_set_string_datapoint_value(uint8_t datapoint_id, const std::string &value);
+  void send_wifi_status_off();
+  void send_wifi_status_flash();
+  void send_wifi_status_solid();
+  bool request_full_datapoint_report_once();
+  optional<bool> get_boolean_datapoint_value(uint8_t datapoint_id);
+  bool is_datapoint_pending(uint8_t datapoint_id) const;
+  void set_command_authorizer(const std::function<bool(const DreoDatapointCommand &)> &authorizer) {
+    this->command_authorizer_ = authorizer;
+  }
+  void add_transition_datapoint(uint8_t datapoint_id) { this->transition_datapoints_.push_back(datapoint_id); }
   DreoInitState get_init_state();
   void add_ignore_mcu_update_on_datapoints(uint8_t ignore_mcu_update_on_datapoints) {
     this->ignore_mcu_update_on_datapoints_.push_back(ignore_mcu_update_on_datapoints);
@@ -85,9 +118,12 @@ class Dreo final : public Component, public uart::UARTDevice {
     this->initialized_callback_.add(std::forward<F>(callback));
   }
 
+ private:
+  void send_wifi_status_(uint8_t status);
+
  protected:
   void handle_char_(uint8_t c);
-  void handle_datapoints_(const uint8_t *buffer, size_t len);
+  void handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report = false);
   optional<DreoDatapoint> get_datapoint_(uint8_t datapoint_id);
   bool validate_message_();
 
@@ -96,9 +132,20 @@ class Dreo final : public Component, public uart::UARTDevice {
   void process_command_queue_();
   void send_command_(const DreoCommand &command);
   void send_empty_command_(DreoCommandType command);
-  void set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType datapoint_type, uint32_t value,
+  bool set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType datapoint_type, uint32_t value,
                                     uint8_t length, bool forced);
-  void send_datapoint_command_(uint8_t datapoint_id, DreoDatapointType datapoint_type, std::vector<uint8_t> data);
+  bool set_string_datapoint_value_(uint8_t datapoint_id, const std::string &value, bool forced);
+  bool send_datapoint_command_(const DreoDatapointCommand &command, std::vector<uint8_t> data);
+  bool authorize_command_(const DreoDatapointCommand &command);
+  void record_pending_transition_(const DreoDatapointCommand &command);
+  void clear_confirmed_transition_(const DreoDatapoint &datapoint, bool authoritative);
+  bool datapoint_confirms_command_(const DreoDatapoint &datapoint, const DreoDatapointCommand &command) const;
+  void schedule_notification_reconciliation_();
+  void schedule_transition_reconciliation_();
+  void queue_reconciliation_request_(DreoReconciliationRoute route);
+  void cancel_reconciliation_(DreoReconciliationRoute route);
+  bool has_pending_transitions_() const { return !this->pending_transitions_.empty(); }
+  bool response_contains_complete_table_(const uint8_t *buffer, size_t len) const;
 
   DreoInitState init_state_ = DreoInitState::INIT_HEARTBEAT;
   bool init_failed_{false};
@@ -116,6 +163,14 @@ class Dreo final : public Component, public uart::UARTDevice {
   CallbackManager<void()> initialized_callback_{};
   uint8_t sequence_ = 0;
   uint8_t command_datapoint_marker_ = 0;
+  std::function<bool(const DreoDatapointCommand &)> command_authorizer_{};
+  std::vector<uint8_t> transition_datapoints_{};
+  std::vector<DreoPendingTransition> pending_transitions_{};
+  uint8_t last_rejected_datapoint_{0xFF};
+  uint32_t last_rejection_log_timestamp_{0};
+  DreoReconciliationRoute reconciliation_route_{DreoReconciliationRoute::NONE};
+  uint32_t notification_reconciliation_due_{0};
+  uint8_t reconciliation_attempts_{0};
 };
 
 }  // namespace esphome::dreo

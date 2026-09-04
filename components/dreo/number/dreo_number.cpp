@@ -1,5 +1,7 @@
 ﻿#include <cmath>
 
+#include <algorithm>
+
 #include "esphome/core/log.h"
 #include "dreo_number.h"
 
@@ -16,12 +18,16 @@ void DreoNumber::setup() {
     if (datapoint.type == DreoDatapointType::INTEGER) {
       ESP_LOGV(TAG, "MCU reported number %u is: %d", datapoint.id, datapoint.value_int);
       float value = datapoint.value_int / multiply_by_;
+      if (this->clamp_reported_value_)
+        value = std::max(this->traits.get_min_value(), std::min(value, this->traits.get_max_value()));
       this->publish_state(value);
       if (this->restore_value_)
         this->pref_.save(&value);
     } else if (datapoint.type == DreoDatapointType::ENUM) {
       ESP_LOGV(TAG, "MCU reported number %u is: %u", datapoint.id, datapoint.value_enum);
       float value = datapoint.value_enum;
+      if (this->clamp_reported_value_)
+        value = std::max(this->traits.get_min_value(), std::min(value, this->traits.get_max_value()));
       this->publish_state(value);
       if (this->restore_value_)
         this->pref_.save(&value);
@@ -64,12 +70,15 @@ void DreoNumber::setup() {
 
 void DreoNumber::control(float value) {
   ESP_LOGV(TAG, "Setting number %u: %f", this->number_id_, value);
+  bool accepted = false;
   if (this->type_ == DreoDatapointType::INTEGER) {
     int integer_value = std::lround(value * multiply_by_);
-    this->parent_->set_integer_datapoint_value(this->number_id_, integer_value);
+    accepted = this->parent_->set_integer_datapoint_value(this->number_id_, integer_value);
   } else if (this->type_ == DreoDatapointType::ENUM) {
-    this->parent_->set_enum_datapoint_value(this->number_id_, value);
+    accepted = this->parent_->set_enum_datapoint_value(this->number_id_, value);
   }
+  if (!accepted)
+    return;
   this->publish_state(value);
 
   if (this->restore_value_)
@@ -93,4 +102,3 @@ void DreoNumber::dump_config() {
 }
 
 }  // namespace esphome::dreo
-

@@ -1,0 +1,328 @@
+esphome:
+  name: dreo-hec005s-mbl01
+  friendly_name: "Dreo DR-HEC005S MBL01"
+  platformio_options:
+    # Decompiled from this unit's stock bootloader partition table. This sets
+    # the logical app-partition size; the build checks the resulting raw image
+    # boundary before it is used on hardware.
+    board_build.bkrbl_size_app: "0x110000"
+
+# Resolve the component from this checkout so the build uses the integer-width
+# and report-continuation support required by this model.
+external_components:
+  - source: components
+
+bk72xx:
+  board: generic-bk7231n-qfn32
+
+logger:
+
+api:
+  id: api_server
+  encryption:
+    key: !secret dreo_hec005s_api_key
+
+ota:
+  - platform: esphome
+    password: !secret dreo_hec005s_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: !secret dreo_hec005s_fallback_ssid
+    password: !secret dreo_hec005s_fallback_password
+  on_connect:
+    then:
+      - script.execute: reconcile_wifi_icon
+  on_disconnect:
+    then:
+      - script.execute: reconcile_wifi_icon
+
+captive_portal:
+
+uart:
+  tx_pin: TX1
+  rx_pin: RX1
+  baud_rate: 115200
+
+dreo:
+  id: dreo_hub
+  command_datapoint_marker: 1
+  transition_datapoints: [1, 3]
+  command_authorizer: |-
+    // Fan power and the off timer remain available while fan state is unknown,
+    // off, or transitioning. Every other command requires confirmed power.
+    if (command.datapoint_id == 1 || command.datapoint_id == 17)
+      return true;
+    auto power = id(dreo_hub).get_boolean_datapoint_value(1);
+    if (!power.has_value() || id(dreo_hub).is_datapoint_pending(1) || !*power)
+      return false;
+
+    // Mist power remains available for recovery. Its dependent controls need
+    // a confirmed on report and remain blocked throughout a transition.
+    if (command.datapoint_id == 3)
+      return true;
+    if (command.datapoint_id == 6 || command.datapoint_id == 7 || command.datapoint_id == 8) {
+      auto mist = id(dreo_hub).get_boolean_datapoint_value(3);
+      return mist.has_value() && !id(dreo_hub).is_datapoint_pending(3) && *mist;
+    }
+    return true;
+
+script:
+  - id: reconcile_wifi_icon
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            lambda: return id(dreo_hub).get_init_state() == esphome::dreo::DreoInitState::INIT_DONE;
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - delay: 5s
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - lambda: id(dreo_hub).send_wifi_status_flash();
+          else:
+            - if:
+                condition:
+                  binary_sensor.is_on: api_state_subscriber_connected
+                then:
+                  - lambda: id(dreo_hub).send_wifi_status_solid();
+                else:
+                  - lambda: id(dreo_hub).send_wifi_status_off();
+
+light:
+  - platform: dreo
+    id: ambient_light
+    name: "Ambient Light"
+    switch_datapoint: 9
+    effect_datapoint: 10
+    effect_options:
+      0: Indicator
+      1: Constant
+      2: Breath
+      3: Cycle
+    brightness_datapoint: 12
+    brightness_options:
+      1: 33%
+      2: 67%
+      3: 100%
+    rgb_datapoint: 13
+    constant_effect: 1
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+    gamma_correct: 1.0
+
+text:
+  - platform: dreo
+    id: indicator_humidity_thresholds
+    name: "Indicator Humidity Thresholds"
+    text_datapoint: 11
+    entity_category: config
+    disabled_by_default: true
+    validator: |-
+      auto comma = value.find(',');
+      if (comma == std::string::npos || comma == 0 || comma + 1 >= value.size() ||
+          value.find(',', comma + 1) != std::string::npos)
+        return false;
+      int low = 0;
+      int high = 0;
+      for (size_t i = 0; i < value.size(); i++) {
+        if (i == comma)
+          continue;
+        char c = value[i];
+        if (c < '0' || c > '9')
+          return false;
+        if (i < comma)
+          low = low * 10 + (c - '0');
+        else
+          high = high * 10 + (c - '0');
+        if (low > 100 || high > 100)
+          return false;
+      }
+      return low < high;
+
+lock:
+  - platform: dreo
+    id: child_lock
+    name: "Child Lock"
+    lock_datapoint: 26
+
+fan:
+  - platform: dreo
+    id: fan_entity
+    name: "Fan"
+    restore_mode: RESTORE_DEFAULT_OFF
+    switch_datapoint: 1
+    speed_datapoint: 5
+    speed_count: 12
+    oscillation_datapoint: 27
+
+select:
+  - platform: dreo
+    id: operating_mode
+    name: "Operating Mode"
+    int_datapoint: 4
+    options:
+      1: Normal
+      2: Auto
+      3: Sleep
+      4: Turbo
+
+  - platform: dreo
+    id: humidify_mode
+    name: "Humidify Mode"
+    int_datapoint: 7
+    options:
+      1: Misting
+      2: Humidify to target
+
+number:
+  - platform: dreo
+    id: mist_level
+    name: "Mist Level"
+    number_datapoint: 6
+    min_value: 1
+    max_value: 4
+    step: 1
+    clamp_reported_value: true
+
+  - platform: dreo
+    id: target_humidity
+    name: "Target Humidity"
+    number_datapoint: 8
+    min_value: 40
+    max_value: 90
+    step: 5
+    device_class: humidity
+    unit_of_measurement: "%"
+
+  - platform: dreo
+    id: auto_off_timer
+    name: "Auto Off Timer"
+    number_datapoint: 17
+    min_value: 0
+    max_value: 719
+    step: 1
+    device_class: duration
+    unit_of_measurement: min
+
+  - platform: dreo
+    id: temperature_calibration
+    name: "Temperature Calibration"
+    number_datapoint: 15
+    min_value: -5
+    max_value: 5
+    step: 1
+    device_class: temperature
+    unit_of_measurement: "°F"
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: dreo
+    id: humidity_calibration
+    name: "Humidity Calibration"
+    number_datapoint: 28
+    min_value: -10
+    max_value: 10
+    step: 1
+    unit_of_measurement: "%"
+    entity_category: config
+    disabled_by_default: true
+
+switch:
+  - platform: dreo
+    id: mist
+    name: "Mist"
+    switch_datapoint: 3
+
+  - platform: dreo
+    id: display_auto_off
+    name: "Display Auto Off"
+    switch_datapoint: 23
+    entity_category: config
+    disabled_by_default: true
+
+  - platform: dreo
+    id: beeper_mute
+    name: "Beeper Mute"
+    switch_datapoint: 25
+    entity_category: config
+    disabled_by_default: true
+
+sensor:
+  - platform: dreo
+    id: ambient_humidity
+    name: "Ambient Humidity"
+    sensor_datapoint: 20
+    device_class: humidity
+    unit_of_measurement: "%"
+
+  - platform: dreo
+    id: ambient_temperature
+    name: "Ambient Temperature"
+    sensor_datapoint: 14
+    device_class: temperature
+    unit_of_measurement: "°F"
+
+  - platform: dreo
+    id: datapoint_16
+    name: "Datapoint 16"
+    sensor_datapoint: 16
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  - platform: dreo
+    id: datapoint_22
+    name: "Datapoint 22"
+    sensor_datapoint: 22
+    entity_category: diagnostic
+    disabled_by_default: true
+
+binary_sensor:
+  - platform: template
+    id: api_state_subscriber_connected
+    internal: true
+    trigger_on_initial_state: true
+    lambda: return id(api_server).is_connected_with_state_subscription();
+    filters:
+      - delayed_on: 1s
+    on_state:
+      then:
+        - script.execute: reconcile_wifi_icon
+
+  - platform: dreo
+    id: low_water
+    name: "Low Water"
+    sensor_datapoint: 19
+    bitmask: 0x01
+    device_class: problem
+    filters:
+      - delayed_on_off: 3s
+
+  - platform: dreo
+    id: datapoint_2
+    name: "Datapoint 2"
+    sensor_datapoint: 2
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  - platform: dreo
+    id: datapoint_18
+    name: "Datapoint 18"
+    sensor_datapoint: 18
+    entity_category: diagnostic
+    disabled_by_default: true
+
+  - platform: dreo
+    id: datapoint_21
+    name: "Datapoint 21"
+    sensor_datapoint: 21
+    entity_category: diagnostic
+    disabled_by_default: true

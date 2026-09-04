@@ -7,6 +7,8 @@ from .. import CONF_DREO_ID, Dreo, dreo_ns
 
 DEPENDENCIES = ["dreo"]
 
+CONF_BITMASK = "bitmask"
+
 DreoBinarySensor = dreo_ns.class_(
     "DreoBinarySensor", binary_sensor.BinarySensor, cg.Component
 )
@@ -17,6 +19,7 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(CONF_DREO_ID): cv.use_id(Dreo),
             cv.Required(CONF_SENSOR_DATAPOINT): cv.uint8_t,
+            cv.Optional(CONF_BITMASK): cv.uint32_t,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -31,4 +34,5 @@ async def to_code(config):
     cg.add(var.set_dreo_parent(paren))
 
     cg.add(var.set_sensor_id(config[CONF_SENSOR_DATAPOINT]))
-
+    if CONF_BITMASK in config:
+        cg.add(var.set_bitmask(config[CONF_BITMASK]))

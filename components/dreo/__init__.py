@@ -9,6 +9,8 @@ CODEOWNERS = ["@davidc"]
 
 CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS = "ignore_mcu_update_on_datapoints"
 CONF_COMMAND_DATAPOINT_MARKER = "command_datapoint_marker"
+CONF_COMMAND_AUTHORIZER = "command_authorizer"
+CONF_TRANSITION_DATAPOINTS = "transition_datapoints"
 
 CONF_ON_DATAPOINT_UPDATE = "on_datapoint_update"
 CONF_DATAPOINT_TYPE = "datapoint_type"
@@ -16,6 +18,7 @@ CONF_DATAPOINT_TYPE = "datapoint_type"
 dreo_ns = cg.esphome_ns.namespace("dreo")
 DreoDatapointType = dreo_ns.enum("DreoDatapointType", is_class=True)
 Dreo = dreo_ns.class_("Dreo", cg.Component, uart.UARTDevice)
+DreoDatapointCommand = dreo_ns.struct("DreoDatapointCommand")
 
 DPTYPE_ANY = "any"
 DPTYPE_BOOL = "bool"
@@ -69,6 +72,8 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(Dreo),
             cv.Optional(CONF_COMMAND_DATAPOINT_MARKER, default=0): cv.uint8_t,
+            cv.Optional(CONF_COMMAND_AUTHORIZER): cv.lambda_,
+            cv.Optional(CONF_TRANSITION_DATAPOINTS): cv.ensure_list(cv.uint8_t),
             cv.Optional(CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS): cv.ensure_list(
                 cv.uint8_t
             ),
@@ -96,6 +101,15 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
     cg.add(var.set_command_datapoint_marker(config[CONF_COMMAND_DATAPOINT_MARKER]))
+    if CONF_COMMAND_AUTHORIZER in config:
+        authorizer = await cg.process_lambda(
+            config[CONF_COMMAND_AUTHORIZER],
+            [(DreoDatapointCommand.operator("ref").operator("const"), "command")],
+            return_type=cg.bool_,
+        )
+        cg.add(var.set_command_authorizer(authorizer))
+    for dp in config.get(CONF_TRANSITION_DATAPOINTS, []):
+        cg.add(var.add_transition_datapoint(dp))
     if CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS in config:
         for dp in config[CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS]:
             cg.add(var.add_ignore_mcu_update_on_datapoints(dp))

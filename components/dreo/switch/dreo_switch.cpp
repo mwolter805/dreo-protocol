@@ -14,8 +14,9 @@ void DreoSwitch::setup() {
 
 void DreoSwitch::write_state(bool state) {
   ESP_LOGV(TAG, "Setting switch %u: %s", this->switch_id_, ONOFF(state));
-  this->parent_->set_boolean_datapoint_value(this->switch_id_, state);
-  this->publish_state(state);
+  if (this->parent_->set_boolean_datapoint_value(this->switch_id_, state) &&
+      !this->parent_->is_datapoint_pending(this->switch_id_))
+    this->publish_state(state);
 }
 
 void DreoSwitch::dump_config() {
@@ -24,4 +25,3 @@ void DreoSwitch::dump_config() {
 }
 
 }  // namespace esphome::dreo
-

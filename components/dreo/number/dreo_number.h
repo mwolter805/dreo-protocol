@@ -17,6 +17,7 @@ class DreoNumber final : public number::Number, public Component {
   void set_datapoint_type(DreoDatapointType type) { type_ = type; }
   void set_datapoint_initial_value(float value) { this->initial_value_ = value; }
   void set_restore_value(bool restore_value) { this->restore_value_ = restore_value; }
+  void set_clamp_reported_value(bool clamp) { this->clamp_reported_value_ = clamp; }
 
   void set_dreo_parent(Dreo *parent) { this->parent_ = parent; }
 
@@ -29,9 +30,9 @@ class DreoNumber final : public number::Number, public Component {
   optional<DreoDatapointType> type_{};
   optional<float> initial_value_{};
   bool restore_value_{false};
+  bool clamp_reported_value_{false};
 
   ESPPreferenceObject pref_;
 };
 
 }  // namespace esphome::dreo
-

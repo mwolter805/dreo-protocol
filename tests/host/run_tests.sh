@@ -16,8 +16,14 @@ c++ $cxxflags \
   -I "$root/tests/host/stubs" \
   -I "$root" \
   "$root/components/dreo/dreo.cpp" \
+  "$root/components/dreo/fan/dreo_fan.cpp" \
+  "$root/components/dreo/light/dreo_light.cpp" \
+  "$root/components/dreo/lock/dreo_lock.cpp" \
+  "$root/components/dreo/number/dreo_number.cpp" \
   "$root/components/dreo/select/dreo_select.cpp" \
+  "$root/components/dreo/switch/dreo_switch.cpp" \
   "$root/components/dreo/binary_sensor/dreo_binary_sensor.cpp" \
+  "$root/components/dreo/text/dreo_text.cpp" \
   "$root/tests/host/dreo_host_test.cpp" \
   -o "$build/dreo_host_test"
 
@@ -26,6 +32,7 @@ cd "$root"
 
 if [ "$mode" = fixed ]; then
   PYTHONDONTWRITEBYTECODE=1 python3 tests/host/test_decode.py --fixed
+  PYTHONDONTWRITEBYTECODE=1 python3 tests/host/test_phase1_contract.py
 else
   PYTHONDONTWRITEBYTECODE=1 python3 tests/host/test_decode.py
 fi

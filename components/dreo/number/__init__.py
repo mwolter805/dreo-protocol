@@ -18,6 +18,7 @@ DEPENDENCIES = ["dreo"]
 
 CONF_DATAPOINT_HIDDEN = "datapoint_hidden"
 CONF_DATAPOINT_TYPE = "datapoint_type"
+CONF_CLAMP_REPORTED_VALUE = "clamp_reported_value"
 
 DreoNumber = dreo_ns.class_("DreoNumber", number.Number, cg.Component)
 
@@ -54,6 +55,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_MIN_VALUE): cv.float_,
             cv.Required(CONF_STEP): cv.positive_float,
             cv.Optional(CONF_MULTIPLY, default=1.0): cv.float_,
+            cv.Optional(CONF_CLAMP_REPORTED_VALUE, default=False): cv.boolean,
             cv.Optional(CONF_DATAPOINT_HIDDEN): cv.All(
                 cv.Schema(
                     {
@@ -84,6 +86,7 @@ async def to_code(config):
     )
 
     cg.add(var.set_write_multiply(config[CONF_MULTIPLY]))
+    cg.add(var.set_clamp_reported_value(config[CONF_CLAMP_REPORTED_VALUE]))
     parent = await cg.get_variable(config[CONF_DREO_ID])
     cg.add(var.set_dreo_parent(parent))
 
@@ -95,4 +98,3 @@ async def to_code(config):
         ) is not None:
             cg.add(var.set_datapoint_initial_value(hidden_init_value))
         cg.add(var.set_restore_value(hidden_config[CONF_RESTORE_VALUE]))
-
