@@ -1,0 +1,115 @@
+# Hardware-free DR-HCF010S product map. The consuming wrapper supplies the
+# UART, board, network, and ESP-local ambient RGB light, including the four
+# ambient effects named below.
+dreo:
+  id: dreo_hub
+  uart_id: mcu_uart
+  command_datapoint_marker: 1
+  # The stock bridge spaced consecutive frames at least 100 ms apart and sent
+  # 01 as the second module-status byte. Both are per-product settings; every
+  # other configuration keeps the 10 ms / 00 defaults.
+  command_spacing: 100ms
+  wifi_status_second_byte: 1
+  transition_datapoints: [1, 3, 4, 5]
+  integer_command_widths:
+    6: 1
+    7: 1
+    8: 1
+    9: 1
+    26: 1
+  allow_sub_entity_control_while_off: false
+  command_authorizer: return id(hcf010s_coordinator).authorize_command(command);
+
+dreo_ceiling_fan:
+  id: hcf010s_coordinator
+  dreo_id: dreo_hub
+  # Positional: the remote's RGB button reports dp25 = 1..4 and each value
+  # selects the effect of the same position. The names must match the effects
+  # the wrapper defines on the ambient light.
+  ambient_preset_effects:
+    - Rainbow Marquee
+    - Rainbow Breath
+    - Rainbow Cycle
+    - Solid Yellow
+
+fan:
+  - platform: dreo_ceiling_fan
+    id: hcf010s_fan
+    dreo_ceiling_fan_id: hcf010s_coordinator
+    name: Fan
+    restore_mode: ALWAYS_OFF
+
+light:
+  - platform: dreo_ceiling_fan
+    id: hcf010s_main_light
+    dreo_ceiling_fan_id: hcf010s_coordinator
+    name: Main Light
+    warm_white_color_temperature: 2700 K
+    cold_white_color_temperature: 6500 K
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+    gamma_correct: 1.0
+
+number:
+  - platform: dreo
+    id: hcf010s_off_timer
+    name: Off Timer
+    number_datapoint: 21
+    min_value: 0
+    max_value: 719
+    step: 1
+    device_class: duration
+    unit_of_measurement: min
+
+switch:
+  - platform: dreo
+    id: hcf010s_mute
+    name: Mute
+    switch_datapoint: 19
+
+sensor:
+  - platform: dreo
+    name: Datapoint 15
+    sensor_datapoint: 15
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 16
+    sensor_datapoint: 16
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 17
+    sensor_datapoint: 17
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 18
+    sensor_datapoint: 18
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 20
+    sensor_datapoint: 20
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 22
+    sensor_datapoint: 22
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 23
+    sensor_datapoint: 23
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 25
+    sensor_datapoint: 25
+    entity_category: diagnostic
+    disabled_by_default: true
+  - platform: dreo
+    name: Datapoint 26
+    sensor_datapoint: 26
+    entity_category: diagnostic
+    disabled_by_default: true

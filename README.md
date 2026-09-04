@@ -23,6 +23,7 @@ although I haven't tested the fan functionality - although that should be fine
 | DR-HTF001S | Tower | -       | | Untested, but I believe this is an earlier version of HTF018S. Reports welcome. |
 | DR-HTF004S | Tower | MBL02   | | Uses a different protocol, will not work. See [dreo-cloudcutter](https://github.com/ouaibe/dreo-cloudcutter) instead. |
 | DR-HEC005S | Tower fan and humidifier | MBL01 (original) | [example-dreo-hec005s-mbl01.yaml](example-dreo-hec005s-mbl01.yaml) | Installed and verified on the original MBL01 module. |
+| DR-HCF010S | Ceiling fan with main light and ambient RGB | ESP32-C3 (original CL187A carrier) | [example-dreo-hcf010s-esp32c3.yaml](example-dreo-hcf010s-esp32c3.yaml) | Installed and verified on the original carrier: fan, modes, reverse, both lights, timer, mute, remote convergence and over-the-air updates. |
 | DR-HTF018S | Tower | MBL01 (original) | [example-dreo-htf018s-mbl01.yaml](example-dreo-htf018s-mbl01.yaml) | Tested ESPhome installs okay, not tested fan functionality. Reports welcome. |
 | DR-HTF018S | Tower | ESP32C3 | [example-dreo-htf018s-esp32c3.yaml](example-dreo-htf018s-esp32c3.yaml) | Tested, works perfectly. |
 | DR-HTF024S | Tower | MBL01 (original) | [example-dreo-htf024s-mbl01.yaml](example-dreo-htf024s-mbl01.yaml) | Untested but [may work](https://github.com/davidc/dreo-protocol/issues/1). |
@@ -31,6 +32,14 @@ The DR-HEC005S example includes its datapoint-backed RGB/effect light, validated
 and a model command policy that blocks state-dependent writes until the fan confirms the required power state.
 It also drives the physical Wi-Fi icon from connection state: flashing after five seconds without Wi-Fi, off while
 Wi-Fi is connected without a state-subscribing ESPHome API client, and solid while such a client is connected.
+
+Compatibility evidence differs by model: DR-HTF018S on ESP32-C3 is behavior-tested,
+DR-HTF018S on the original MBL01 is install-tested only, DR-HTF024S remains
+untested, and DR-HEC005S is locally behavior-tested. The shared host suite and
+compile fixtures provide regression evidence for those existing configurations;
+they do not replace device testing. DR-HCF010S is device-tested on its original
+carrier; its `dreo_ceiling_fan` coordinator models that fan's master power gate
+and the remote's ambient preset cursor.
 
 Please report back successes or failures. Please be careful and always ensure you have a way to restore the original firmware
 if needed (e.g. UART), I accept no responsibility for bricked devices!

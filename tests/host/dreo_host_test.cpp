@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -18,6 +20,9 @@
 #include "components/dreo/select/dreo_select.h"
 #include "components/dreo/switch/dreo_switch.h"
 #include "components/dreo/text/dreo_text.h"
+#include "components/dreo_ceiling_fan/dreo_ceiling_fan.h"
+#include "components/dreo_ceiling_fan/fan/dreo_ceiling_fan_fan.h"
+#include "components/dreo_ceiling_fan/light/dreo_ceiling_fan_light.h"
 #undef protected
 
 using esphome::advance_millis;
@@ -25,6 +30,7 @@ using esphome::set_millis;
 using esphome::dreo::Dreo;
 using esphome::dreo::DreoBinarySensor;
 using esphome::dreo::DreoCommand;
+using esphome::dreo::DreoCommandType;
 using esphome::dreo::DreoDatapoint;
 using esphome::dreo::DreoDatapointCommand;
 using esphome::dreo::DreoDatapointType;
@@ -36,6 +42,10 @@ using esphome::dreo::DreoNumber;
 using esphome::dreo::DreoSelect;
 using esphome::dreo::DreoSwitch;
 using esphome::dreo::DreoText;
+using esphome::dreo_ceiling_fan::AMBIENT_PRESET_COUNT;
+using esphome::dreo_ceiling_fan::DreoCeilingFan;
+using esphome::dreo_ceiling_fan::DreoCeilingFanFan;
+using esphome::dreo_ceiling_fan::DreoCeilingFanLight;
 
 namespace {
 
@@ -81,9 +91,9 @@ std::vector<uint8_t> integer_dp(uint8_t id, const std::vector<uint8_t> &value) {
   return datapoint(id, DreoDatapointType::INTEGER, value);
 }
 
-std::vector<uint8_t> wifi_status_frame(uint8_t sequence, uint8_t status) {
-  return {0x55, 0xAA, 0x00, sequence, 0x03, 0x00, 0x00, 0x02, status, 0x00,
-          static_cast<uint8_t>(0x55 + 0xAA + sequence + 0x03 + 0x02 + status)};
+std::vector<uint8_t> wifi_status_frame(uint8_t sequence, uint8_t status, uint8_t second_byte = 0x00) {
+  return {0x55, 0xAA, 0x00, sequence, 0x03, 0x00, 0x00, 0x02, status, second_byte,
+          static_cast<uint8_t>(0x55 + 0xAA + sequence + 0x03 + 0x02 + status + second_byte)};
 }
 
 std::vector<uint8_t> boolean_dp(uint8_t id, bool value) {
@@ -709,6 +719,674 @@ void test_subordinate_control_policy() {
   }
 }
 
+class AmbientTestOutput : public esphome::light::LightOutput {
+ public:
+  esphome::light::LightTraits get_traits() override {
+    esphome::light::LightTraits traits;
+    traits.set_supported_color_modes({esphome::light::ColorMode::RGB});
+    return traits;
+  }
+  void write_state(esphome::light::LightState *) override { writes++; }
+  size_t writes{0};
+};
+
+void set_hcf_state(Dreo &dreo, bool master, bool fan, bool main_light, bool ambient, uint8_t mode = 1,
+                   uint8_t speed = 6, uint8_t brightness = 50, uint8_t color_temperature = 50) {
+  std::vector<uint8_t> report;
+  append(report, boolean_dp(1, master));
+  append(report, boolean_dp(3, fan));
+  append(report, boolean_dp(4, main_light));
+  append(report, boolean_dp(5, ambient));
+  append(report, integer_dp(6, {0, 0, 0, mode}));
+  append(report, integer_dp(7, {0, 0, 0, speed}));
+  append(report, integer_dp(8, {0, 0, 0, brightness}));
+  append(report, integer_dp(9, {0, 0, 0, color_temperature}));
+  dreo.handle_datapoints_(report.data(), report.size());
+}
+
+std::vector<uint8_t> queued_ids(const Dreo &dreo) {
+  std::vector<uint8_t> ids;
+  for (const auto &command : dreo.command_queue_) {
+    if (command.cmd == DreoCommandType::DATAPOINT_DELIVER)
+      ids.push_back(command.payload[0]);
+  }
+  return ids;
+}
+
+void configure_hcf(Dreo &dreo, DreoCeilingFan &coordinator) {
+  for (uint8_t id : {uint8_t{1}, uint8_t{3}, uint8_t{4}, uint8_t{5}})
+    dreo.add_transition_datapoint(id);
+  for (uint8_t id : {uint8_t{6}, uint8_t{7}, uint8_t{8}, uint8_t{9}})
+    dreo.set_integer_command_width(id, 1);
+  dreo.set_command_authorizer([&coordinator](const DreoDatapointCommand &command) {
+    return coordinator.authorize_command(command);
+  });
+  coordinator.setup();
+}
+
+void test_ceiling_fan_coordinator() {
+  for (bool master : {false, true}) {
+    for (bool fan_child : {false, true}) {
+      for (bool light_child : {false, true}) {
+        Dreo dreo;
+        DreoCeilingFan coordinator(&dreo);
+        DreoCeilingFanFan fan(&coordinator);
+        DreoCeilingFanLight main_light(&coordinator);
+        esphome::light::LightState main_light_state(&main_light);
+        fan.setup();
+        configure_hcf(dreo, coordinator);
+        set_hcf_state(dreo, master, fan_child, light_child, false);
+        require(fan.state == (master && fan_child), "fan composition state was not master && child");
+        require(main_light_state.remote_values.is_on() == (master && light_child),
+                "main-light composition state was not master && child");
+      }
+    }
+  }
+
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanLight main_light(&coordinator);
+    esphome::light::LightState main_light_state(&main_light);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, false, true, false, 1, 6, 1, 0);
+    require(near(main_light_state.remote_values.get_brightness(), 0.01f),
+            "main-light dp08=1 did not publish as one-percent brightness");
+    require(near(main_light.wire_to_color_temperature_(0), 1000000.0f / 2700.0f) &&
+                near(main_light.wire_to_color_temperature_(100), 1000000.0f / 6500.0f),
+            "main-light color-temperature endpoints did not map to 2700-6500 K");
+    require(main_light.color_temperature_to_wire_(1000000.0f / 2700.0f) == 0 &&
+                main_light.color_temperature_to_wire_(1000000.0f / 6500.0f) == 100,
+            "main-light color-temperature endpoints did not map back to dp09 0-100");
+  }
+
+  for (bool allow : {false, true}) {
+    for (bool master : {false, true}) {
+      for (bool child : {false, true}) {
+        Dreo dreo;
+        DreoCeilingFan coordinator(&dreo);
+        configure_hcf(dreo, coordinator);
+        dreo.set_allow_sub_entity_control_while_off(allow);
+        set_hcf_state(dreo, master, child, child, false);
+        const bool expected = allow || (master && child);
+        require(dreo.force_set_integer_datapoint_value(6, 2) == expected,
+                "fan subordinate authorization matrix mismatch");
+        require(dreo.force_set_integer_datapoint_value(8, 60) == expected,
+                "main-light subordinate authorization matrix mismatch");
+      }
+    }
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    dreo.set_allow_sub_entity_control_while_off(true);
+    require(!dreo.force_set_integer_datapoint_value(6, 2), "unknown HCF parents did not fail closed");
+    set_hcf_state(dreo, false, false, false, false);
+    require(dreo.force_set_boolean_datapoint_value(1, true), "pending-parent fixture did not queue master");
+    require(!dreo.force_set_integer_datapoint_value(6, 2), "pending HCF parent did not fail closed");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    dreo.set_allow_sub_entity_control_while_off(true);
+    set_hcf_state(dreo, true, false, false, false);
+    require(dreo.force_set_boolean_datapoint_value(3, true), "pending-fan-child fixture did not queue child");
+    require(!dreo.force_set_integer_datapoint_value(7, 8), "pending fan child did not fail closed");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    dreo.set_allow_sub_entity_control_while_off(true);
+    set_hcf_state(dreo, true, false, false, false);
+    require(dreo.force_set_boolean_datapoint_value(4, true), "pending-light-child fixture did not queue child");
+    require(!dreo.force_set_integer_datapoint_value(9, 75), "pending main-light child did not fail closed");
+  }
+  for (bool allow : {false, true}) {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    dreo.set_allow_sub_entity_control_while_off(allow);
+    set_hcf_state(dreo, false, false, false, false);
+    require(!dreo.force_set_boolean_datapoint_value(19, true),
+            "off-state option granted an unrelated datapoint while master was off");
+    set_hcf_state(dreo, true, false, false, false);
+    require(dreo.force_set_boolean_datapoint_value(19, true),
+            "off-state option changed the existing unrelated-datapoint result");
+  }
+
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, true, true);
+    coordinator.control_fan(true, false, {}, {});
+    require(queued_ids(dreo) == std::vector<uint8_t>({4, 5, 3, 1}),
+            "children-first fan power sequence was not exact");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, true, false, true);
+    coordinator.control_main_light(true, false, {}, {});
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 5, 4, 1}),
+            "children-first main-light power sequence was not exact");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, true, true, false);
+    coordinator.control_ambient(true);
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 4, 5, 1}),
+            "children-first ambient power sequence was not exact");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, true, true, false);
+    coordinator.control_fan(false, true, {}, {});
+    require(queued_ids(dreo) == std::vector<uint8_t>({3}), "multi-feature fan-off did not write only its child");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, true, false, false);
+    coordinator.control_fan(false, true, {}, {});
+    require(queued_ids(dreo) == std::vector<uint8_t>({1}), "sole-feature fan-off did not write only master");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, true, true, false);
+    coordinator.control_main_light(false, true, {}, {});
+    require(queued_ids(dreo) == std::vector<uint8_t>({4}),
+            "multi-feature main-light-off did not write only its child");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, false, true, false);
+    coordinator.control_main_light(false, true, {}, {});
+    require(queued_ids(dreo) == std::vector<uint8_t>({1}),
+            "sole-feature main-light-off did not write only master");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, true, false, true);
+    coordinator.control_ambient(false);
+    require(queued_ids(dreo) == std::vector<uint8_t>({5}),
+            "multi-feature ambient-off did not write only its child");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, true, false, false, true);
+    coordinator.control_ambient(false);
+    require(queued_ids(dreo) == std::vector<uint8_t>({1}),
+            "sole-feature ambient-off did not write only master");
+  }
+
+  for (bool master_first : {false, true}) {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanFan fan(&coordinator);
+    fan.setup();
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, false, false, 1, 6);
+    auto first = fan.make_call();
+    first.set_state(true).set_speed(4).perform();
+    auto replacement = fan.make_call();
+    replacement.set_state(true).set_speed(9).perform();
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 1}), "queued replacement duplicated power commands");
+    auto report_first = boolean_dp(master_first ? 1 : 3, true);
+    dreo.handle_datapoints_(report_first.data(), report_first.size());
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 1}), "setting flushed before both parent reports");
+    auto report_second = boolean_dp(master_first ? 3 : 1, true);
+    dreo.handle_datapoints_(report_second.data(), report_second.size());
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 1, 7}), "queued setting did not flush exactly once");
+    require(dreo.command_queue_.back().payload == command_payload(7, 0, DreoDatapointType::INTEGER, {9}),
+            "last-write-wins fan setting used the wrong value or width");
+    dreo.handle_datapoints_(report_second.data(), report_second.size());
+    const auto ids = queued_ids(dreo);
+    require(std::count(ids.begin(), ids.end(), uint8_t{7}) == 1, "queued fan setting flushed more than once");
+  }
+
+  // A turn-on call that carries a preset mode while the fan is off: the mode
+  // must reach dp06 exactly once, after the power writes, and the fan must
+  // publish that preset. Observed on the wire 2026-09-03/04: only the power
+  // datapoints were written and the fan came on in the MCU's retained mode.
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanFan fan(&coordinator);
+    fan.setup();
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, false, false, 2, 6);  // retained mode Natural
+    auto call = fan.make_call();
+    call.set_state(true).set_preset_mode("Normal").perform();
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 1}),
+            "turn-on with preset did not queue exactly the power writes first");
+    auto ack = std::vector<uint8_t>{};
+    dreo.handle_datapoints_(ack.data(), ack.size());
+    set_hcf_state(dreo, false, true, false, false, 2, 6);   // MCU: dp03 on, dp06 still 2
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 1}),
+            "turn-on preset flushed before the master report");
+    set_hcf_state(dreo, true, true, false, false, 2, 6);    // MCU: dp01 on
+    require(queued_ids(dreo) == std::vector<uint8_t>({3, 1, 6}),
+            "turn-on with preset did not write dp06 exactly once after the power writes");
+    require(dreo.command_queue_.back().payload == command_payload(6, 0, DreoDatapointType::INTEGER, {1}),
+            "turn-on preset wrote the wrong dp06 value or width");
+    set_hcf_state(dreo, true, true, false, false, 1, 6);    // MCU echoes dp06=1
+    require(fan.get_preset_mode() == "Normal", "turn-on preset did not publish Normal");
+    const auto ids = queued_ids(dreo);
+    require(std::count(ids.begin(), ids.end(), uint8_t{6}) == 1, "turn-on preset wrote dp06 more than once");
+  }
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanFan fan(&coordinator);
+    fan.setup();
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, false, false, 2, 6);
+    auto call = fan.make_call();
+    call.set_state(true).perform();
+    set_hcf_state(dreo, false, true, false, false, 2, 6);
+    set_hcf_state(dreo, true, true, false, false, 2, 6);
+    const auto ids = queued_ids(dreo);
+    require(std::count(ids.begin(), ids.end(), uint8_t{6}) == 0,
+            "plain turn-on wrote dp06 although no preset was requested");
+    require(fan.get_preset_mode() == "Natural", "plain turn-on did not keep the MCU's retained mode");
+  }
+
+  for (bool master_first : {false, true}) {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanLight main_light(&coordinator);
+    esphome::light::LightState state(&main_light);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, false, false, 1, 6, 50, 50);
+    state.flush();
+    auto first = state.make_call();
+    first.set_state(true).set_brightness(0.25f).set_color_temperature(1000000.0f / 2700.0f).perform();
+    state.flush();
+    auto replacement = state.make_call();
+    replacement.set_state(true).set_brightness(0.65f).set_color_temperature(1000000.0f / 6500.0f).perform();
+    state.flush();
+    require(queued_ids(dreo) == std::vector<uint8_t>({4, 1}),
+            "queued main-light replacement duplicated power commands");
+    auto report_first = boolean_dp(master_first ? 1 : 4, true);
+    dreo.handle_datapoints_(report_first.data(), report_first.size());
+    require(queued_ids(dreo) == std::vector<uint8_t>({4, 1}),
+            "main-light settings flushed before both parent reports");
+    auto report_second = boolean_dp(master_first ? 4 : 1, true);
+    dreo.handle_datapoints_(report_second.data(), report_second.size());
+    require(queued_ids(dreo) == std::vector<uint8_t>({4, 1, 8, 9}),
+            "queued main-light settings did not flush exactly once");
+    require(dreo.command_queue_[2].payload == command_payload(8, 0, DreoDatapointType::INTEGER, {65}) &&
+                dreo.command_queue_[3].payload == command_payload(9, 0, DreoDatapointType::INTEGER, {100}),
+            "last-write-wins main-light settings used the wrong values or widths");
+    dreo.handle_datapoints_(report_second.data(), report_second.size());
+    const auto ids = queued_ids(dreo);
+    require(std::count(ids.begin(), ids.end(), uint8_t{8}) == 1 &&
+                std::count(ids.begin(), ids.end(), uint8_t{9}) == 1,
+            "queued main-light settings flushed more than once");
+  }
+
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanFan fan(&coordinator);
+    fan.setup();
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, false, false);
+    auto on = fan.make_call();
+    on.set_state(true).set_speed(10).perform();
+    auto off = fan.make_call();
+    off.set_state(false).perform();
+    auto master = boolean_dp(1, true);
+    auto child = boolean_dp(3, true);
+    dreo.handle_datapoints_(master.data(), master.size());
+    dreo.handle_datapoints_(child.data(), child.size());
+    const auto ids = queued_ids(dreo);
+    require(std::count(ids.begin(), ids.end(), uint8_t{7}) == 0,
+            "off request did not cancel queued fan setting");
+  }
+
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanLight main_light(&coordinator);
+    esphome::light::LightState state(&main_light);
+    configure_hcf(dreo, coordinator);
+    set_hcf_state(dreo, false, false, false, false);
+    state.flush();
+    auto on = state.make_call();
+    on.set_state(true).set_brightness(0.8f).perform();
+    state.flush();
+    auto off = state.make_call();
+    off.set_state(false).perform();
+    state.flush();
+    auto master = boolean_dp(1, true);
+    auto child = boolean_dp(4, true);
+    dreo.handle_datapoints_(master.data(), master.size());
+    dreo.handle_datapoints_(child.data(), child.size());
+    const auto ids = queued_ids(dreo);
+    require(std::count(ids.begin(), ids.end(), uint8_t{8}) == 0 &&
+                std::count(ids.begin(), ids.end(), uint8_t{9}) == 0,
+            "off request did not cancel queued main-light settings");
+  }
+
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    DreoCeilingFanFan fan(&coordinator);
+    fan.setup();
+    configure_hcf(dreo, coordinator);
+    // What Home Assistant is told. The modes must reach the traits object the
+    // platform returns, not just the Fan's own storage; the installed image
+    // registered them in setup() and still advertised preset_modes: [].
+    {
+      const auto traits = fan.get_traits();
+      require(traits.supports_speed() && traits.supported_speed_count() == 12 && traits.supports_direction() &&
+                  !traits.supports_oscillation(),
+              "fan traits changed speed count, direction or oscillation");
+      require(traits.supports_preset_modes(), "fan traits advertise no preset modes");
+      const auto &modes = traits.supported_preset_modes();
+      require(modes.size() == 3 && std::strcmp(modes[0], "Normal") == 0 && std::strcmp(modes[1], "Natural") == 0 &&
+                  std::strcmp(modes[2], "Sleep") == 0,
+              "fan traits do not advertise exactly Normal, Natural, Sleep");
+    }
+    for (uint8_t mode : {uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}}) {
+      set_hcf_state(dreo, true, true, false, false, mode);
+      require(fan.direction == (mode == 4 ? esphome::fan::FanDirection::REVERSE
+                                         : esphome::fan::FanDirection::FORWARD),
+              "fan mode published the wrong direction");
+      if (mode == 1)
+        require(fan.get_preset_mode() == "Normal", "dp06=1 did not publish Normal");
+      else if (mode == 2)
+        require(fan.get_preset_mode() == "Natural", "dp06=2 did not publish Natural");
+      else if (mode == 3)
+        require(fan.get_preset_mode() == "Sleep", "dp06=3 did not publish Sleep");
+      else
+        require(fan.get_preset_mode().empty(), "reverse report retained a forward preset");
+    }
+    dreo.command_queue_.clear();
+    auto forward = fan.make_call();
+    forward.set_direction(esphome::fan::FanDirection::FORWARD).perform();
+    require(dreo.command_queue_.back().payload == command_payload(6, 0, DreoDatapointType::INTEGER, {1}),
+            "direct forward request did not select Normal/dp06=1");
+  }
+
+  {
+    Dreo dreo;
+    DreoCeilingFan coordinator(&dreo);
+    AmbientTestOutput output;
+    esphome::light::LightState ambient(&output);
+    coordinator.set_ambient_light(&ambient);
+    configure_hcf(dreo, coordinator);
+    auto startup = ambient.make_call();
+    startup.set_state(true).perform();
+    require(dreo.command_queue_.empty(), "ambient startup callback wrote before authoritative state");
+    set_hcf_state(dreo, true, false, false, false);
+    dreo.command_queue_.clear();
+
+    auto unsuppressed = ambient.make_call();
+    unsuppressed.set_state(true).perform();
+    require(queued_ids(dreo) == std::vector<uint8_t>({5}),
+            "ambient negative control did not observe one callback and attempted dp05 write");
+
+    dreo.command_queue_.clear();
+    coordinator.publish_ambient_();
+    require(dreo.command_queue_.empty(), "suppressed ambient publication looped back to UART");
+    require(coordinator.ambient_power_.has_value() && !*coordinator.ambient_power_,
+            "suppressed ambient publication changed retained dp05 state");
+  }
+}
+
+class NamedEffect : public esphome::light::LightEffect {
+ public:
+  using esphome::light::LightEffect::LightEffect;
+  void apply() override {}
+};
+
+const char *const PRESET_NAMES[] = {"Rainbow Marquee", "Rainbow Breath", "Rainbow Cycle", "Solid Yellow"};
+
+// Counts string commands for one datapoint in everything the hub has queued or
+// already written, so a sentinel cannot be missed just because the queue drained.
+size_t count_string_commands(const Dreo &dreo, uint8_t datapoint_id, const std::string &value) {
+  size_t count = 0;
+  for (const auto &command : dreo.command_queue_) {
+    if (command.cmd != DreoCommandType::DATAPOINT_DELIVER || command.payload.empty())
+      continue;
+    if (command.payload[0] != datapoint_id)
+      continue;
+    if (command.payload[2] != static_cast<uint8_t>(DreoDatapointType::STRING))
+      continue;
+    const std::string body(command.payload.begin() + 5, command.payload.end());
+    if (body == value)
+      count++;
+  }
+  return count;
+}
+
+size_t count_queued(const Dreo &dreo, uint8_t datapoint_id) {
+  size_t count = 0;
+  for (uint8_t id : queued_ids(dreo)) {
+    if (id == datapoint_id)
+      count++;
+  }
+  return count;
+}
+
+struct AmbientFixture {
+  Dreo dreo;
+  DreoCeilingFan coordinator{&dreo};
+  AmbientTestOutput output;
+  esphome::light::LightState ambient{&output};
+  NamedEffect marquee{PRESET_NAMES[0]};
+  NamedEffect breath{PRESET_NAMES[1]};
+  NamedEffect cycle{PRESET_NAMES[2]};
+  NamedEffect yellow{PRESET_NAMES[3]};
+
+  AmbientFixture() {
+    ambient.add_effects({&marquee, &breath, &cycle, &yellow});
+    for (const char *name : PRESET_NAMES)
+      coordinator.add_ambient_preset_effect(name);
+    // Mirrors the product package: marker 1 and a one-byte dp26 width.
+    dreo.set_command_datapoint_marker(1);
+    dreo.set_integer_command_width(26, 1);
+    configure_hcf(dreo, coordinator);
+    coordinator.set_ambient_light(&ambient);
+  }
+
+  void report_preset_cursor(uint8_t value) {
+    auto body = integer_dp(25, {0, 0, 0, value});
+    dreo.handle_datapoints_(body.data(), body.size());
+  }
+
+  // The MCU reports dp28 = "0" in every status report from the first one
+  // after boot, so on hardware the sentinel's last known value always equals
+  // the constant the coordinator wants to send. A fixture without this seed
+  // never reaches the transport's unchanged-value branch, which is how the
+  // original test passed an image that sent nothing.
+  void report_predefine_sentinel() {
+    auto body = string_dp(28, "0");
+    dreo.handle_datapoints_(body.data(), body.size());
+  }
+};
+
+// The recovered dp25-dp28 behaviour. Each assertion below is written so the
+// opposite implementation would fail it: a suppressed remote change that still
+// emitted the sentinel, an out-of-range cursor that indexed the map, or a
+// preset that applied while the ambient output was off.
+void test_ceiling_fan_ambient_presets() {
+  // dp25 selects a preset only while dp01 and dp05 are both on.
+  {
+    AmbientFixture fixture;
+    set_hcf_state(fixture.dreo, true, false, false, false);
+    fixture.report_preset_cursor(2);
+    require(fixture.ambient.current_effect.empty(), "preset applied while the ambient output was off");
+
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    fixture.report_preset_cursor(2);
+    require(fixture.ambient.current_effect == PRESET_NAMES[1], "dp25=2 did not select the second preset");
+
+    // 0 means "keep the last effect", so it must change nothing.
+    fixture.report_preset_cursor(0);
+    require(fixture.ambient.current_effect == PRESET_NAMES[1], "dp25=0 replaced the running effect");
+
+    // Anything past the configured presets is ignored rather than clamped.
+    for (uint8_t invalid : {uint8_t{5}, uint8_t{11}, uint8_t{200}}) {
+      fixture.report_preset_cursor(invalid);
+      require(fixture.ambient.current_effect == PRESET_NAMES[1],
+              "an out-of-range dp25 value changed the running effect");
+    }
+
+    fixture.report_preset_cursor(4);
+    require(fixture.ambient.current_effect == PRESET_NAMES[3], "dp25=4 did not select the fourth preset");
+  }
+
+  // A remote-originated preset must not look like a local change: no sentinel
+  // and no ambient power command follow it.
+  {
+    AmbientFixture fixture;
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    fixture.report_predefine_sentinel();
+    const size_t power_before = count_queued(fixture.dreo, 5) + count_queued(fixture.dreo, 1);
+    fixture.report_preset_cursor(3);
+    require(fixture.ambient.current_effect == PRESET_NAMES[2], "remote preset precondition did not apply");
+    require(count_string_commands(fixture.dreo, 28, "0") == 0, "a remote preset emitted the dp28 sentinel");
+    require(count_queued(fixture.dreo, 5) + count_queued(fixture.dreo, 1) == power_before,
+            "a remote preset emitted an ambient power command");
+  }
+
+  // A user change emits exactly one sentinel, with the outputs on and with the
+  // master gate off — and with dp28 already reported as "0", as it always is
+  // on hardware, so a deduplicating send would be dropped here too.
+  for (bool master_on : {true, false}) {
+    AmbientFixture fixture;
+    set_hcf_state(fixture.dreo, master_on, false, false, master_on);
+    fixture.report_predefine_sentinel();
+    require(count_string_commands(fixture.dreo, 28, "0") == 0, "state reports alone emitted the sentinel");
+
+    fixture.ambient.make_call().set_state(true).set_rgb(1.0f, 0.0f, 0.0f).perform();
+    require(count_string_commands(fixture.dreo, 28, "0") == 1,
+            "a user colour change did not emit exactly one dp28 sentinel");
+
+    fixture.ambient.make_call().set_state(true).set_brightness(0.25f).perform();
+    require(count_string_commands(fixture.dreo, 28, "0") == 2,
+            "a user brightness change did not emit its own dp28 sentinel");
+
+    fixture.ambient.make_call().set_state(true).set_effect(PRESET_NAMES[0]).perform();
+    require(count_string_commands(fixture.dreo, 28, "0") == 3,
+            "a user effect change did not emit its own dp28 sentinel");
+  }
+
+  // The MCU does not reset dp25 on dp28 (measured on the wire 2026-09-03): its
+  // reply to the sentinel write repeats the cursor it already reported. That
+  // repeat must not re-select the preset the user just left, while a remote
+  // press — which changes dp25 — must still apply its preset.
+  {
+    AmbientFixture fixture;
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    fixture.report_predefine_sentinel();
+    fixture.report_preset_cursor(1);
+    require(fixture.ambient.current_effect == PRESET_NAMES[0], "cursor-reply precondition did not apply preset 1");
+
+    fixture.ambient.make_call().set_state(true).set_effect(PRESET_NAMES[3]).perform();
+    require(fixture.ambient.current_effect == PRESET_NAMES[3], "the user's effect change did not take");
+    require(count_string_commands(fixture.dreo, 28, "0") == 1, "the user change did not emit exactly one dp28 sentinel");
+    fixture.report_preset_cursor(1);
+    require(fixture.ambient.current_effect == PRESET_NAMES[3], "the MCU's dp25 re-report re-applied the preset");
+    require(count_string_commands(fixture.dreo, 28, "0") == 1, "the MCU's dp25 re-report emitted a dp28 sentinel");
+
+    fixture.report_preset_cursor(2);
+    require(fixture.ambient.current_effect == PRESET_NAMES[1], "a remote press to dp25=2 did not apply its preset");
+
+    // The remote can revisit a cursor value only by cycling through its off
+    // position, which the stock capture shows resets dp25 to 0.
+    fixture.ambient.make_call().set_state(true).set_effect(PRESET_NAMES[3]).perform();
+    require(count_string_commands(fixture.dreo, 28, "0") == 2, "the second user change did not emit its sentinel");
+    fixture.report_preset_cursor(2);
+    require(fixture.ambient.current_effect == PRESET_NAMES[3], "a repeated dp25=2 re-applied the preset");
+    set_hcf_state(fixture.dreo, true, false, false, false);
+    fixture.report_preset_cursor(0);
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    fixture.report_preset_cursor(1);
+    require(fixture.ambient.current_effect == PRESET_NAMES[0], "dp25=1 after the off cycle did not apply preset 1");
+    require(count_string_commands(fixture.dreo, 28, "0") == 2, "the remote's return to dp25=1 emitted a sentinel");
+  }
+
+  // Power-only calls carry no sentinel, including an explicit turn-off while
+  // an effect runs: ESPHome stops the effect on that call, which must not be
+  // counted as a presentation change or forget the remembered effect. The MCU's
+  // reports after each write are what resume the effect, as on hardware.
+  {
+    AmbientFixture fixture;
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    fixture.report_predefine_sentinel();
+    fixture.ambient.make_call().set_state(false).perform();
+    fixture.ambient.make_call().set_state(true).perform();
+    require(count_string_commands(fixture.dreo, 28, "0") == 0, "a power-only call emitted the dp28 sentinel");
+
+    fixture.report_preset_cursor(1);
+    require(fixture.ambient.current_effect == PRESET_NAMES[0], "power-off precondition did not select a preset");
+    fixture.ambient.make_call().set_state(false).perform();
+    require(fixture.ambient.current_effect.empty(), "stub did not model ESPHome stopping the effect on turn-off");
+    require(count_string_commands(fixture.dreo, 28, "0") == 0, "turning off with an effect running emitted the dp28 sentinel");
+    set_hcf_state(fixture.dreo, true, false, false, false);
+    fixture.ambient.make_call().set_state(true).perform();
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    require(fixture.ambient.current_effect == PRESET_NAMES[0], "the effect did not resume after a user off/on cycle");
+    require(count_string_commands(fixture.dreo, 28, "0") == 0, "the user off/on cycle emitted the dp28 sentinel");
+  }
+
+  // The remembered effect survives an MCU-originated off/on cycle. The stub
+  // reproduces ESPHome's rule that an explicit turn-off stops the effect, so
+  // this would fail without the restore.
+  {
+    AmbientFixture fixture;
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    fixture.report_preset_cursor(3);
+    require(fixture.ambient.current_effect == PRESET_NAMES[2], "restore precondition did not select a preset");
+    set_hcf_state(fixture.dreo, true, false, false, false);
+    require(fixture.ambient.current_effect.empty(), "stub did not model ESPHome stopping the effect on turn-off");
+    set_hcf_state(fixture.dreo, true, false, false, true);
+    require(fixture.ambient.current_effect == PRESET_NAMES[2], "the remembered effect did not resume on the on report");
+  }
+
+  // dp26: one one-byte correction after initialization, and none once the MCU
+  // agrees.
+  {
+    AmbientFixture fixture;
+    fixture.dreo.init_state_ = esphome::dreo::DreoInitState::INIT_DATAPOINT;
+    auto body = boolean_dp(1, true);
+    fixture.dreo.handle_command_(static_cast<uint8_t>(DreoCommandType::DATAPOINT_REPORT), 0, 0, body.data(),
+                                 body.size());
+    require(count_queued(fixture.dreo, 26) == 1, "initialization did not write the preset count exactly once");
+    for (const auto &command : fixture.dreo.command_queue_) {
+      if (command.cmd == DreoCommandType::DATAPOINT_DELIVER && command.payload[0] == 26) {
+        require(command.payload == command_payload(26, 1, DreoDatapointType::INTEGER, {AMBIENT_PRESET_COUNT}),
+                "the preset-count command was not a one-byte dp26=4");
+      }
+    }
+    auto agreed = integer_dp(26, {0, 0, 0, AMBIENT_PRESET_COUNT});
+    fixture.dreo.handle_datapoints_(agreed.data(), agreed.size());
+    require(count_queued(fixture.dreo, 26) == 1, "an agreeing dp26 report queued another correction");
+  }
+}
+
 void test_existing_platform_type_safety() {
   Dreo dreo;
   DreoSelect select;
@@ -970,6 +1648,67 @@ void test_transition_switch_and_off_effect() {
   require(light_parent.command_queue_.empty(), "later on/effect report echoed a command");
 }
 
+// The two opt-in hub settings must leave every existing configuration on the
+// exact frame and pacing it had before they existed, and must take effect only
+// where a configuration asks for them. Each half below is written so the other
+// setting's value would fail it.
+void test_command_spacing_and_status_byte() {
+  {
+    Dreo defaults;
+    require(defaults.get_command_spacing() == 10, "omitted command spacing did not stay at 10 ms");
+    require(defaults.get_wifi_status_second_byte() == 0, "omitted Wi-Fi status second byte did not stay at 0");
+  }
+
+  // Explicit second byte reaches the wire; the rest of the frame is unchanged.
+  for (uint8_t status : {uint8_t{0}, uint8_t{3}, uint8_t{5}}) {
+    Dreo configured;
+    configured.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
+    configured.set_wifi_status_second_byte(1);
+    set_millis(10000 + status * 1000);
+    if (status == 0)
+      configured.send_wifi_status_off();
+    else if (status == 3)
+      configured.send_wifi_status_flash();
+    else
+      configured.send_wifi_status_solid();
+    require(configured.tx_bytes == wifi_status_frame(0, status, 1),
+            "configured Wi-Fi status second byte did not reach the wire");
+    require(configured.command_queue_.size() == 1 &&
+                configured.command_queue_.front().payload == std::vector<uint8_t>({status, 1}),
+            "configured Wi-Fi status payload was not {status, 1}");
+  }
+
+  // Queue threshold. The default 10 ms release and the configured 100 ms
+  // release are separated by a 51 ms observation: the default must have sent
+  // the second frame by then and the configured one must not have.
+  for (bool configured : {false, true}) {
+    Dreo dreo;
+    dreo.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
+    if (configured)
+      dreo.set_command_spacing(100);
+    set_millis(30000);
+    dreo.send_wifi_status_off();
+    dreo.send_wifi_status_flash();
+    const auto first = wifi_status_frame(0, 0);
+    require(dreo.tx_bytes == first && dreo.command_queue_.size() == 2,
+            "spacing fixture did not queue the second status behind the first");
+
+    dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::WIFI_STATE), 0, 0, nullptr, 0);
+    advance_millis(51);
+    dreo.process_command_queue_();
+    if (configured) {
+      require(dreo.tx_bytes == first,
+              "100 ms spacing released the second status after only 51 ms");
+      advance_millis(60);
+      dreo.process_command_queue_();
+    }
+    auto expected = first;
+    const auto second = wifi_status_frame(1, 3);
+    expected.insert(expected.end(), second.begin(), second.end());
+    require(dreo.tx_bytes == expected, "second status was not released once the spacing elapsed");
+  }
+}
+
 void test_wifi_status_senders() {
   for (uint8_t status : {uint8_t{0}, uint8_t{3}, uint8_t{5}}) {
     Dreo dreo;
@@ -1106,11 +1845,14 @@ void run_fixed() {
   test_lock();
   test_guard();
   test_subordinate_control_policy();
+  test_ceiling_fan_coordinator();
+  test_ceiling_fan_ambient_presets();
   test_existing_platform_type_safety();
   test_masked_binary_sensor_and_number_clamp();
   test_reconciliation_scheduler();
   test_transition_switch_and_off_effect();
   test_wifi_status_senders();
+  test_command_spacing_and_status_byte();
   test_diagnostic_full_report_request();
   std::cout << "PASS: actual C++ sources satisfy parser, light, text, lock, guard, and legacy regressions\n";
 }

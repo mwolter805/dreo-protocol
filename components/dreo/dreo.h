@@ -12,6 +12,16 @@
 
 namespace esphome::dreo {
 
+// Minimum gap between consecutive transmissions, in milliseconds, when a
+// configuration does not choose its own. Products whose stock bridge paced
+// frames more slowly raise it through the hub's `command_spacing` option.
+static constexpr uint32_t DEFAULT_COMMAND_SPACING_MS = 10;
+
+// Second payload byte of the module status frame when a configuration does not
+// choose its own. Products whose stock bridge sent a different value set it
+// through the hub's `wifi_status_second_byte` option.
+static constexpr uint8_t DEFAULT_WIFI_STATUS_SECOND_BYTE = 0x00;
+
 enum class DreoDatapointType : uint8_t {
   // RAW = 0x00,      // variable length
   BOOLEAN = 0x01,  // 1 byte (0/1)
@@ -119,6 +129,10 @@ class Dreo final : public Component, public uart::UARTDevice {
     this->ignore_mcu_update_on_datapoints_.push_back(ignore_mcu_update_on_datapoints);
   }
   void set_command_datapoint_marker(uint8_t marker) { this->command_datapoint_marker_ = marker; }
+  void set_command_spacing(uint32_t milliseconds) { this->command_spacing_ = milliseconds; }
+  uint32_t get_command_spacing() const { return this->command_spacing_; }
+  void set_wifi_status_second_byte(uint8_t value) { this->wifi_status_second_byte_ = value; }
+  uint8_t get_wifi_status_second_byte() const { return this->wifi_status_second_byte_; }
   template<typename F> void add_on_initialized_callback(F &&callback) {
     this->initialized_callback_.add(std::forward<F>(callback));
   }
@@ -169,6 +183,8 @@ class Dreo final : public Component, public uart::UARTDevice {
   CallbackManager<void()> initialized_callback_{};
   uint8_t sequence_ = 0;
   uint8_t command_datapoint_marker_ = 0;
+  uint32_t command_spacing_{DEFAULT_COMMAND_SPACING_MS};
+  uint8_t wifi_status_second_byte_{DEFAULT_WIFI_STATUS_SECOND_BYTE};
   std::vector<std::pair<uint8_t, uint8_t>> integer_command_widths_{};
   bool allow_sub_entity_control_while_off_{false};
   std::function<bool(const DreoDatapointCommand &)> command_authorizer_{};

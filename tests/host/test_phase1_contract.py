@@ -132,7 +132,18 @@ interval:
         )
         self.assertIsNotNone(helper)
         self.assertIn(".cmd = DreoCommandType::WIFI_STATE", helper.group("body"))
-        self.assertIn(".payload = {status, 0x00}", helper.group("body"))
+        # The second payload byte became a configurable field whose default is
+        # still 0, so the guarantee is now expressed in two parts: the helper
+        # sends the field, and the field defaults to zero. The exact wire frame
+        # a configuration that sets nothing produces is asserted separately by
+        # the host harness.
+        self.assertIn(".payload = {status, this->wifi_status_second_byte_}", helper.group("body"))
+        self.assertIn(
+            "static constexpr uint8_t DEFAULT_WIFI_STATUS_SECOND_BYTE = 0x00;", self.header
+        )
+        self.assertIn(
+            "uint8_t wifi_status_second_byte_{DEFAULT_WIFI_STATUS_SECOND_BYTE};", self.header
+        )
         self.assertNotIn("send_candidate_wifi_status_once", self.header + self.core)
 
     def test_full_table_request_is_guarded_and_diagnostic(self):

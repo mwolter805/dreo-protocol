@@ -6,11 +6,11 @@
 #include "esphome/core/util.h"
 
 #include <algorithm>
+#include <cinttypes>
 
 namespace esphome::dreo {
 
 static const char *const TAG = "dreo";
-static const int COMMAND_DELAY = 10;
 static const int RECEIVE_TIMEOUT = 300;
 static const int MAX_RETRIES = 5;
 static constexpr size_t MAX_STRING_DATAPOINT_BYTES = 255;
@@ -50,6 +50,8 @@ void Dreo::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Allow subordinate controls while off: %s",
                 YESNO(this->allow_sub_entity_control_while_off_));
+  ESP_LOGCONFIG(TAG, "  Command spacing: %" PRIu32 " ms", this->command_spacing_);
+  ESP_LOGCONFIG(TAG, "  Wi-Fi status second byte: %u", this->wifi_status_second_byte_);
   if (this->init_state_ != DreoInitState::INIT_DONE) {
     if (this->init_failed_) {
       ESP_LOGCONFIG(TAG, "  Initialization failed. Current init_state: %u", static_cast<uint8_t>(this->init_state_));
@@ -64,7 +66,7 @@ void Dreo::dump_config() {
     if (info.type == DreoDatapointType::BOOLEAN) {
       ESP_LOGCONFIG(TAG, "  Datapoint %u: boolean (value: %s)", info.id, ONOFF(info.value_bool));
     } else if (info.type == DreoDatapointType::INTEGER) {
-      ESP_LOGCONFIG(TAG, "  Datapoint %u: int value (value: %d)", info.id, info.value_int);
+      ESP_LOGCONFIG(TAG, "  Datapoint %u: int value (value: %" PRId32 ")", info.id, info.value_int);
     } else if (info.type == DreoDatapointType::STRING) {
       ESP_LOGCONFIG(TAG, "  Datapoint %u: string value (len: %zu)", info.id, info.value_string.size());
     } else if (info.type == DreoDatapointType::ENUM) {
@@ -305,7 +307,7 @@ void Dreo::handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritat
             value -= int64_t{1} << (data_size * 8);
           datapoint.value_int = static_cast<int32_t>(value);
         }
-        ESP_LOGD(TAG, "Datapoint %u update to %d", datapoint.id, datapoint.value_int);
+        ESP_LOGD(TAG, "Datapoint %u update to %" PRId32, datapoint.id, datapoint.value_int);
         break;
       case DreoDatapointType::STRING:
         if (data_size > MAX_STRING_DATAPOINT_BYTES) {
@@ -470,7 +472,7 @@ void Dreo::process_command_queue_() {
   }
 
   // Left check of delay since last command in case there's ever a command sent by calling send_raw_command_ directly
-  if (delay > COMMAND_DELAY && !this->command_queue_.empty() && this->rx_message_.empty() &&
+  if (delay > this->command_spacing_ && !this->command_queue_.empty() && this->rx_message_.empty() &&
       !this->expected_response_.has_value()) {
     this->send_raw_command_(command_queue_.front());
     if (command_queue_.front().reconciliation_route != DreoReconciliationRoute::NONE)
@@ -591,7 +593,8 @@ void Dreo::send_wifi_status_solid() {
 }
 
 void Dreo::send_wifi_status_(uint8_t status) {
-  this->send_command_(DreoCommand{.cmd = DreoCommandType::WIFI_STATE, .payload = {status, 0x00}});
+  this->send_command_(
+      DreoCommand{.cmd = DreoCommandType::WIFI_STATE, .payload = {status, this->wifi_status_second_byte_}});
 }
 
 bool Dreo::request_full_datapoint_report_once() {

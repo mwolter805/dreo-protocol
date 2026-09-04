@@ -1,0 +1,128 @@
+esphome:
+  name: dreo-hcf010s-esp32c3
+  friendly_name: "Dreo DR-HCF010S"
+
+external_components:
+  - source: components
+    components: [dreo, dreo_ceiling_fan]
+
+packages:
+  hcf010s: !include packages/dreo-hcf010s.yaml
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+  # The stock carrier's own 4 MiB layout, decoded from a real unit. It keeps
+  # the per-unit `identity` region where ESP-IDF's default table would put data.
+  flash_size: 4MB
+  partitions: partitions/dr-hcf010s.csv
+
+logger:
+
+api:
+  encryption:
+    key: !secret dreo_hcf010s_api_key
+
+ota:
+  - platform: esphome
+    password: !secret dreo_hcf010s_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: !secret dreo_hcf010s_fallback_ssid
+    password: !secret dreo_hcf010s_fallback_password
+
+captive_portal:
+
+# Read from the stock application: UART1 at 115200 8N1 with TX on GPIO0 and RX
+# on GPIO1, matching the carrier's six-pin edge connector.
+uart:
+  id: mcu_uart
+  tx_pin: GPIO0
+  rx_pin: GPIO1
+  baud_rate: 115200
+
+# Also read from the stock application: WS2812 timing on GPIO7, 30 pixels, and
+# an R-G-B byte order rather than the usual GRB. Whether the physical parts
+# expect that order is the one thing code could not settle, so a pure
+# red/green/blue test is still owed on real hardware.
+light:
+  - platform: esp32_rmt_led_strip
+    id: hcf010s_ambient_rgb
+    name: Ambient RGB
+    pin: GPIO7
+    chipset: WS2812
+    num_leds: 30
+    channel_colors: RGB
+    # Keeps the colour, brightness and effect the user last chose without
+    # lighting the strip at boot; the MCU's dp01/dp05 reports decide power.
+    restore_mode: RESTORE_DEFAULT_OFF
+    default_transition_length: 0s
+    effects:
+      # The four presets the remote's RGB button cycles, re-created from the
+      # stock effect documents. They are close enough to recognise each preset,
+      # not frame-for-frame copies of the vendor's animation engine.
+      #
+      # Preset 1: one red-green-blue gradient spanning the strip, scrolling a
+      # full pass per second.
+      - addressable_rainbow:
+          name: Rainbow Marquee
+          speed: 66
+          width: 30
+      # Preset 2: seven whole-strip colours, each breathing up from a dim floor
+      # and back over a two-second window; fourteen seconds per cycle.
+      - addressable_lambda:
+          name: Rainbow Breath
+          update_interval: 33ms
+          lambda: |-
+            static const uint8_t PALETTE[7][3] = {{255, 0, 0},   {255, 128, 0}, {255, 255, 0}, {0, 255, 0},
+                                                  {0, 255, 255}, {0, 0, 255},   {255, 0, 255}};
+            uint8_t peak = current_color.r > current_color.g ? current_color.r : current_color.g;
+            if (current_color.b > peak)
+              peak = current_color.b;
+            const float scale = peak / 255.0f;
+            const uint32_t cycle = millis() % 14000u;
+            const uint32_t step = cycle / 2000u;
+            const uint32_t phase = cycle % 2000u;
+            const float ramp = phase < 1000u ? phase / 1000.0f : (2000u - phase) / 1000.0f;
+            const float level = (0.125f + 0.875f * ramp) * scale;
+            it.all() = Color((uint8_t) (PALETTE[step][0] * level), (uint8_t) (PALETTE[step][1] * level),
+                             (uint8_t) (PALETTE[step][2] * level));
+      # Preset 3: the same seven colours as whole-strip cross-fades, two
+      # seconds each; fourteen seconds per cycle.
+      - addressable_lambda:
+          name: Rainbow Cycle
+          update_interval: 33ms
+          lambda: |-
+            static const uint8_t PALETTE[7][3] = {{255, 0, 0},   {255, 128, 0}, {255, 255, 0}, {0, 255, 0},
+                                                  {0, 255, 255}, {0, 0, 255},   {255, 0, 255}};
+            uint8_t peak = current_color.r > current_color.g ? current_color.r : current_color.g;
+            if (current_color.b > peak)
+              peak = current_color.b;
+            const float scale = peak / 255.0f;
+            const uint32_t cycle = millis() % 14000u;
+            const uint32_t step = cycle / 2000u;
+            const uint32_t next = (step + 1u) % 7u;
+            const float blend = (cycle % 2000u) / 2000.0f;
+            float channel[3];
+            for (uint8_t i = 0; i < 3; i++)
+              channel[i] = (PALETTE[step][i] + (PALETTE[next][i] - PALETTE[step][i]) * blend) * scale;
+            it.all() = Color((uint8_t) channel[0], (uint8_t) channel[1], (uint8_t) channel[2]);
+      # Preset 4: a steady yellow fill.
+      - addressable_lambda:
+          name: Solid Yellow
+          update_interval: 1s
+          lambda: |-
+            uint8_t peak = current_color.r > current_color.g ? current_color.r : current_color.g;
+            if (current_color.b > peak)
+              peak = current_color.b;
+            const float scale = peak / 255.0f;
+            it.all() = Color((uint8_t) (255 * scale), (uint8_t) (255 * scale), 0);
+
+dreo_ceiling_fan:
+  id: hcf010s_coordinator
+  ambient_light_id: hcf010s_ambient_rgb

@@ -3,12 +3,15 @@ import esphome.codegen as cg
 from esphome.components import time, uart
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_SENSOR_DATAPOINT, CONF_TRIGGER_ID
+from esphome.core import TimePeriod
 
 DEPENDENCIES = ["uart"]
 CODEOWNERS = ["@davidc"]
 
 CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS = "ignore_mcu_update_on_datapoints"
 CONF_COMMAND_DATAPOINT_MARKER = "command_datapoint_marker"
+CONF_COMMAND_SPACING = "command_spacing"
+CONF_WIFI_STATUS_SECOND_BYTE = "wifi_status_second_byte"
 CONF_INTEGER_COMMAND_WIDTHS = "integer_command_widths"
 CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF = "allow_sub_entity_control_while_off"
 CONF_COMMAND_AUTHORIZER = "command_authorizer"
@@ -74,6 +77,19 @@ CONFIG_SCHEMA = (
         {
             cv.GenerateID(): cv.declare_id(Dreo),
             cv.Optional(CONF_COMMAND_DATAPOINT_MARKER, default=0): cv.uint8_t,
+            # Minimum gap between consecutive transmissions. The default keeps
+            # the historical 10 ms pacing; a product whose stock bridge paced
+            # frames more slowly raises it here.
+            cv.Optional(CONF_COMMAND_SPACING, default="10ms"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(
+                    min=TimePeriod(milliseconds=1),
+                    max=TimePeriod(milliseconds=1000),
+                ),
+            ),
+            # Second payload byte of the module status frame. The default keeps
+            # the historical zero byte.
+            cv.Optional(CONF_WIFI_STATUS_SECOND_BYTE, default=0): cv.uint8_t,
             cv.Optional(CONF_INTEGER_COMMAND_WIDTHS, default={}): cv.Schema(
                 {cv.uint8_t: cv.one_of(1, 2, 4, int=True)}
             ),
@@ -107,6 +123,8 @@ async def to_code(config):
     await cg.register_component(var, config)
     await uart.register_uart_device(var, config)
     cg.add(var.set_command_datapoint_marker(config[CONF_COMMAND_DATAPOINT_MARKER]))
+    cg.add(var.set_command_spacing(config[CONF_COMMAND_SPACING].total_milliseconds))
+    cg.add(var.set_wifi_status_second_byte(config[CONF_WIFI_STATUS_SECOND_BYTE]))
     for datapoint_id, width in config[CONF_INTEGER_COMMAND_WIDTHS].items():
         cg.add(var.set_integer_command_width(datapoint_id, width))
     cg.add(

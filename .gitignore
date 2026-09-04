@@ -1,0 +1,4 @@
+# Python bytecode caches. ESPHome imports the component's __init__.py on every
+# config or compile run, so these reappear constantly and are never source.
+__pycache__/
+*.py[cod]

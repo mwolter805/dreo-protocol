@@ -1,0 +1,5 @@
+packages:
+  base: !include widths-omitted.yaml
+
+dreo:
+  command_spacing: 2000ms

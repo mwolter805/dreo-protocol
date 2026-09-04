@@ -24,6 +24,9 @@ c++ $cxxflags \
   "$root/components/dreo/switch/dreo_switch.cpp" \
   "$root/components/dreo/binary_sensor/dreo_binary_sensor.cpp" \
   "$root/components/dreo/text/dreo_text.cpp" \
+  "$root/components/dreo_ceiling_fan/dreo_ceiling_fan.cpp" \
+  "$root/components/dreo_ceiling_fan/fan/dreo_ceiling_fan_fan.cpp" \
+  "$root/components/dreo_ceiling_fan/light/dreo_ceiling_fan_light.cpp" \
   "$root/tests/host/dreo_host_test.cpp" \
   -o "$build/dreo_host_test"
 

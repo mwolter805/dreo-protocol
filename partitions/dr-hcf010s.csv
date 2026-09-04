@@ -1,0 +1,26 @@
+# Partition table for the Dreo DR-HCF010S ceiling fan's Wi-Fi carrier
+# (CL187A_WIFI_V1.0, ESP32-C3, 4 MiB flash).
+#
+# Every offset and size below was decoded from the partition table read out of
+# one physical unit, not copied from a generic ESP-IDF template or from another
+# Dreo model. Keeping the stock layout means a replacement image lands in the
+# same application slots the stock bootloader already uses, and the four data
+# regions the stock firmware wrote stay exactly where they are.
+#
+# `fs`, `identity`, `nvs_1` and `effect` are listed even though ESPHome never
+# reads them. They are declared so nothing else can be given their addresses:
+# `identity` in particular holds per-unit data that cannot be regenerated, and
+# the recovery plan depends on it surviving an install untouched. Do not
+# reorder, resize, or drop a row to make a build fit — grow nothing into these
+# addresses.
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x4000,
+otadata,  data, ota,     0xD000,   0x2000,
+phy_init, data, phy,     0xF000,   0x1000,
+ota_0,    app,  ota_0,   0x10000,  0x1A9000,
+ota_1,    app,  ota_1,   0x1C0000, 0x1A9000,
+fs,       data, spiffs,  0x369000, 0x20000,
+identity, data, 0x06,    0x389000, 0x1000,
+nvs_1,    data, nvs,     0x38A000, 0x10000,
+effect,   data, nvs,     0x39A000, 0x20000,

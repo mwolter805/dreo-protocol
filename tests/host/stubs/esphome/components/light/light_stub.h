@@ -8,15 +8,25 @@
 
 namespace esphome::light {
 
-enum class ColorMode { ON_OFF, BRIGHTNESS, RGB };
+enum class ColorMode { ON_OFF, BRIGHTNESS, RGB, COLOR_TEMPERATURE };
 
 class LightTraits {
  public:
   void set_supported_color_modes(std::initializer_list<ColorMode> modes) { modes_ = modes; }
+  void set_min_mireds(float value) { min_mireds_ = value; }
+  void set_max_mireds(float value) { max_mireds_ = value; }
   std::vector<ColorMode> modes_;
+  float min_mireds_{0};
+  float max_mireds_{0};
 };
 
 class LightState;
+
+class LightRemoteValuesListener {
+ public:
+  virtual ~LightRemoteValuesListener() = default;
+  virtual void on_light_remote_values_update() = 0;
+};
 
 class LightEffect {
  public:
@@ -41,6 +51,7 @@ class LightColorValues {
   float get_red() const { return red_; }
   float get_green() const { return green_; }
   float get_blue() const { return blue_; }
+  float get_color_temperature() const { return color_temperature_; }
 
   bool state_{false};
   float brightness_{1.0f};
@@ -48,6 +59,7 @@ class LightColorValues {
   float red_{1.0f};
   float green_{1.0f};
   float blue_{1.0f};
+  float color_temperature_{153.846f};
 };
 
 class LightOutput {
@@ -70,8 +82,10 @@ class LightCall {
     blue_ = blue;
     return *this;
   }
-  LightCall &set_effect(const char *name) { effect_ = name; return *this; }
+  LightCall &set_effect(const char *name) { effect_ = std::string(name); return *this; }
+  LightCall &set_effect(const std::string &name) { effect_ = name; return *this; }
   LightCall &set_transition_length(uint32_t value) { transition_length_ = value; return *this; }
+  LightCall &set_color_temperature(float value) { color_temperature_ = value; return *this; }
   LightCall &set_save(bool) { return *this; }
   void perform();
 
@@ -84,6 +98,7 @@ class LightCall {
   std::optional<float> blue_;
   std::optional<std::string> effect_;
   std::optional<uint32_t> transition_length_;
+  std::optional<float> color_temperature_;
 };
 
 class LightState {
@@ -96,7 +111,22 @@ class LightState {
       effect->init_internal(this);
   }
   LightOutput *get_output() const { return output_; }
+  void add_remote_values_listener(LightRemoteValuesListener *listener) { listeners_.push_back(listener); }
   size_t get_effect_count() const { return effects_.size(); }
+  // Mirrors LightState's 1-indexed effect cursor; 0 means no effect.
+  uint32_t get_current_effect_index() const { return active_effect_index_; }
+  std::string get_effect_name_by_index(uint32_t index) const {
+    if (index == 0 || index > effects_.size())
+      return {};
+    return std::string(effects_[index - 1]->get_name());
+  }
+  uint32_t effect_index_by_name(const std::string &name) const {
+    for (size_t i = 0; i < effects_.size(); i++) {
+      if (name == effects_[i]->get_name())
+        return static_cast<uint32_t>(i) + 1;
+    }
+    return 0;
+  }
   void flush() {
     if (pending_write_) {
       pending_write_ = false;
@@ -108,12 +138,15 @@ class LightState {
   LightColorValues remote_values;
   size_t publish_count{0};
   size_t invalid_effect_transition_count{0};
+  size_t effect_while_turning_off_count{0};
+  uint32_t active_effect_index_{0};
   std::string current_effect;
 
  protected:
   friend class LightCall;
   LightOutput *output_;
   std::vector<LightEffect *> effects_;
+  std::vector<LightRemoteValuesListener *> listeners_;
   bool pending_write_{false};
 };
 
@@ -137,16 +170,32 @@ inline void LightCall::perform() {
       values.blue_ = blue / maximum;
     }
   }
-  if (this->effect_.has_value()) {
-    for (auto *effect : this->parent_->effects_) {
-      if (*this->effect_ == effect->get_name()) {
-        this->parent_->current_effect = *this->effect_;
-        effect->start();
-        break;
-      }
+  if (this->color_temperature_.has_value())
+    values.color_temperature_ = *this->color_temperature_;
+  // Effect resolution follows LightCall::validate_/perform in ESPHome:
+  //  - an effect is never started by a call that turns the light off;
+  //  - an explicit turn-off stops whatever effect is running.
+  // Both matter here: without the second rule a test could "prove" that an
+  // effect survives an MCU-originated off report when on real hardware it does
+  // not.
+  const bool explicit_turn_off = this->state_.has_value() && !*this->state_;
+  if (this->effect_.has_value() && !values.state_) {
+    this->parent_->effect_while_turning_off_count++;
+  } else if (this->effect_.has_value()) {
+    const uint32_t index = this->parent_->effect_index_by_name(*this->effect_);
+    if (index != this->parent_->active_effect_index_) {
+      this->parent_->active_effect_index_ = index;
+      this->parent_->current_effect = this->parent_->get_effect_name_by_index(index);
+      if (index != 0)
+        this->parent_->effects_[index - 1]->start();
     }
+  } else if (explicit_turn_off && this->parent_->active_effect_index_ != 0) {
+    this->parent_->active_effect_index_ = 0;
+    this->parent_->current_effect.clear();
   }
   this->parent_->remote_values = values;
+  for (auto *listener : this->parent_->listeners_)
+    listener->on_light_remote_values_update();
   this->parent_->output_->update_state(this->parent_);
   this->parent_->pending_write_ = true;
   this->parent_->publish_count++;
