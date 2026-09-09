@@ -109,6 +109,10 @@ void DreoLight::write_state(light::LightState *state) {
     return;
   }
 
+  // A single call may carry an effect together with brightness and colour (Home Assistant sends
+  // light.turn_on with effect, brightness and rgb_color as one command). Send the effect first,
+  // then continue to the remaining requested settings instead of returning here.
+  bool requested_non_constant = false;
   if (this->requested_effect_.has_value()) {
     uint32_t value = *this->requested_effect_;
     this->requested_effect_.reset();
@@ -116,8 +120,9 @@ void DreoLight::write_state(light::LightState *state) {
       this->wire_effect_ = value;
     } else {
       this->restore_visible_state_();
+      return;
     }
-    return;
+    requested_non_constant = !this->constant_effect_.has_value() || value != *this->constant_effect_;
   }
 
   if (this->brightness_id_.has_value() && this->wire_brightness_.has_value()) {
@@ -131,7 +136,8 @@ void DreoLight::write_state(light::LightState *state) {
     }
   }
 
-  if (this->rgb_id_.has_value() && this->wire_rgb_.has_value()) {
+  // Colour only applies to the constant effect; a call that selected another effect keeps it.
+  if (this->rgb_id_.has_value() && this->wire_rgb_.has_value() && !requested_non_constant) {
     uint32_t value = this->rgb_from_state_(state);
     if (value != *this->wire_rgb_) {
       bool selected_constant = false;

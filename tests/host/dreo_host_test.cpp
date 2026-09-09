@@ -727,6 +727,40 @@ void test_light() {
             "effect-only call emitted the wrong mode");
   }
 
+  // One call carrying an effect together with brightness and colour, as Home Assistant sends
+  // light.turn_on with effect, brightness and rgb_color: every requested setting must be sent.
+  dreo.command_queue_.clear();
+  auto combined = state.make_call();
+  combined.set_effect("Constant").set_brightness(0.33f).set_rgb(0x22 / 255.0f, 0x33 / 255.0f, 0x44 / 255.0f).perform();
+  state.flush();
+  require(dreo.command_queue_.size() == 3, "combined effect/brightness/colour call did not emit three commands");
+  require(dreo.command_queue_[0].payload == command_payload(10, 1, DreoDatapointType::INTEGER, {1}),
+          "combined call did not send the effect first");
+  require(dreo.command_queue_[1].payload == command_payload(12, 1, DreoDatapointType::INTEGER, {1}),
+          "combined call dropped brightness");
+  require(dreo.command_queue_[2].payload == command_payload(13, 1, DreoDatapointType::INTEGER, {0, 0x22, 0x33, 0x44}),
+          "combined call dropped colour");
+  require(state.current_effect == "Constant", "combined call did not publish the requested effect");
+
+  // Brightness still applies with a non-constant effect; colour does not.
+  dreo.command_queue_.clear();
+  auto breath_dim = state.make_call();
+  breath_dim.set_effect("Breath").set_brightness(0.67f).perform();
+  state.flush();
+  require(dreo.command_queue_.size() == 2 &&
+              dreo.command_queue_[0].payload == command_payload(10, 1, DreoDatapointType::INTEGER, {2}) &&
+              dreo.command_queue_[1].payload == command_payload(12, 1, DreoDatapointType::INTEGER, {2}),
+          "combined effect/brightness call did not send effect then brightness");
+
+  dreo.command_queue_.clear();
+  auto cycle_colour = state.make_call();
+  cycle_colour.set_effect("Cycle").set_rgb(0x11 / 255.0f, 0x22 / 255.0f, 0x33 / 255.0f).perform();
+  state.flush();
+  require(dreo.command_queue_.size() == 1 &&
+              dreo.command_queue_[0].payload == command_payload(10, 1, DreoDatapointType::INTEGER, {3}),
+          "colour sent with a non-constant effect must not re-select Constant");
+  require(state.current_effect == "Cycle", "combined effect/colour call lost the requested effect");
+
   dreo.command_queue_.clear();
   auto off = state.make_call();
   off.set_state(false).perform();
@@ -739,6 +773,19 @@ void test_light() {
   dreo.handle_datapoints_(autonomous.data(), autonomous.size());
   state.flush();
   require(dreo.command_queue_.empty(), "later autonomous RGB report echoed a command");
+
+  // From off: power, effect, brightness and colour in one call, in that order.
+  dreo.command_queue_.clear();
+  auto on_combined = state.make_call();
+  on_combined.set_state(true).set_effect("Constant").set_brightness(1.0f).set_rgb(0x11 / 255.0f, 0x22 / 255.0f,
+                                                                                 0x33 / 255.0f).perform();
+  state.flush();
+  require(dreo.command_queue_.size() == 4, "combined turn-on call did not emit four commands");
+  require(dreo.command_queue_[0].payload == command_payload(9, 1, DreoDatapointType::BOOLEAN, {1}) &&
+              dreo.command_queue_[1].payload == command_payload(10, 1, DreoDatapointType::INTEGER, {1}) &&
+              dreo.command_queue_[2].payload == command_payload(12, 1, DreoDatapointType::INTEGER, {3}) &&
+              dreo.command_queue_[3].payload == command_payload(13, 1, DreoDatapointType::INTEGER, {0, 0x11, 0x22, 0x33}),
+          "combined turn-on call emitted the wrong frames or order");
 
   Dreo guarded;
   guarded.set_command_datapoint_marker(1);
