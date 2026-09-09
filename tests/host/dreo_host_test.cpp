@@ -96,6 +96,18 @@ std::vector<uint8_t> wifi_status_frame(uint8_t sequence, uint8_t status, uint8_t
           static_cast<uint8_t>(0x55 + 0xAA + sequence + 0x03 + 0x02 + status + second_byte)};
 }
 
+std::vector<uint8_t> protocol_frame(uint8_t sequence, DreoCommandType command, const std::vector<uint8_t> &body,
+                                    uint8_t version = 0) {
+  std::vector<uint8_t> frame{0x55, 0xAA, version, sequence, static_cast<uint8_t>(command), 0,
+                             static_cast<uint8_t>(body.size() >> 8), static_cast<uint8_t>(body.size())};
+  frame.insert(frame.end(), body.begin(), body.end());
+  uint8_t checksum = 0;
+  for (uint8_t byte : frame)
+    checksum += byte;
+  frame.push_back(checksum);
+  return frame;
+}
+
 std::vector<uint8_t> boolean_dp(uint8_t id, bool value) {
   return datapoint(id, DreoDatapointType::BOOLEAN, {static_cast<uint8_t>(value)});
 }
@@ -142,6 +154,11 @@ const DreoDatapoint *find_dp(const Dreo &dreo, uint8_t id) {
       return &datapoint;
   }
   return nullptr;
+}
+
+void feed(Dreo &dreo, const std::vector<uint8_t> &bytes, size_t start = 0) {
+  for (size_t i = start; i < bytes.size(); i++)
+    dreo.handle_char_(bytes[i]);
 }
 
 void configure_hec_guard(Dreo &dreo) {
@@ -192,6 +209,280 @@ void run_baseline() {
 }
 
 #ifdef DREO_FIXED_TESTS
+void test_stream_retransmission_recovery() {
+  const auto report = protocol_frame(0x22, DreoCommandType::DATAPOINT_REPORT, boolean_dp(1, true));
+
+  Dreo control;
+  feed(control, report);
+  require(find_dp(control, 1) != nullptr && find_dp(control, 1)->value_bool,
+          "valid retransmission control did not parse by itself");
+
+  // A candidate report declares twelve body bytes, delivers only two, then is
+  // abandoned in favour of a complete report beginning with a fresh header.
+  // The old parser trusted the abandoned length and consumed the new frame as
+  // its body/checksum before clearing the whole receive buffer.
+  Dreo abandoned;
+  const std::vector<uint8_t> prefix{0x55, 0xAA, 0x00, 0x21, 0x07, 0x00, 0x00, 0x0C, 0x01, 0x01};
+  feed(abandoned, prefix);
+  feed(abandoned, report);
+  require(find_dp(abandoned, 1) != nullptr && find_dp(abandoned, 1)->value_bool,
+          "complete retransmission after an abandoned report was lost");
+
+  Dreo split_header;
+  feed(split_header, {0x55, 0xAA, 0x00, 0x30, 0x07, 0x00, 0x00, 0x00, 0x55});
+  require(split_header.rx_message_ == std::vector<uint8_t>({0x55}),
+          "reject did not preserve a trailing first header byte");
+  feed(split_header, report, 1);
+  require(find_dp(split_header, 1) != nullptr, "header split across a rejected candidate was lost");
+
+  Dreo body_magic;
+  const std::string magic_value{'x', static_cast<char>(0x55), static_cast<char>(0xAA), 'y'};
+  feed(body_magic, protocol_frame(0x23, DreoCommandType::DATAPOINT_REPORT, string_dp(2, magic_value)));
+  require(find_dp(body_magic, 2) != nullptr && find_dp(body_magic, 2)->value_string == magic_value,
+          "header bytes inside a valid body split the frame");
+
+  Dreo missing_lead;
+  feed(missing_lead, report, 1);
+  require(find_dp(missing_lead, 1) == nullptr, "missing leading 0x55 was reconstructed");
+  feed(missing_lead, report);
+  require(find_dp(missing_lead, 1) != nullptr, "clean frame after missing-leading control was lost");
+
+  Dreo corrupt;
+  auto bad_checksum = report;
+  bad_checksum.back() ^= 0x01;
+  feed(corrupt, bad_checksum);
+  require(find_dp(corrupt, 1) == nullptr, "checksum-rejected body was published");
+  feed(corrupt, report);
+  require(find_dp(corrupt, 1) != nullptr, "clean frame after corrupt input was lost");
+
+  Dreo oversized;
+  feed(oversized, {0x55, 0xAA, 0x00, 0x24, 0x07, 0x00, 0xFF, 0xFF});
+  require(oversized.rx_message_.empty(), "above-limit length remained buffered");
+  feed(oversized, report);
+  require(find_dp(oversized, 1) != nullptr, "clean frame after above-limit length was lost");
+
+  Dreo noise;
+  feed(noise, std::vector<uint8_t>(2048, 0x42));
+  require(noise.rx_message_.empty(), "header-free noise grew the receive buffer");
+  feed(noise, std::vector<uint8_t>(2048, 0x55));
+  require(noise.rx_message_.size() == 1, "repeated partial headers grew the receive buffer");
+
+  Dreo timed_out;
+  set_millis(1000);
+  feed(timed_out, {0x55, 0xAA, 0x00, 0x25, 0x07, 0x00, 0x00, 0xC8, 0x01, 0x01});
+  advance_millis(301);
+  timed_out.process_command_queue_();
+  require(timed_out.rx_message_.empty(), "permanently truncated frame survived timeout rejection");
+  feed(timed_out, report);
+  require(find_dp(timed_out, 1) != nullptr, "clean frame after timeout rejection was lost");
+
+  Dreo warnings;
+  require(warnings.frame_warning_allowed_(), "first frame warning was suppressed");
+  require(!warnings.frame_warning_allowed_(), "repeated frame warning was not rate limited");
+  advance_millis(1000);
+  require(warnings.frame_warning_allowed_(), "frame warning did not resume after the rate-limit interval");
+  set_millis(0);
+}
+
+void test_report_acknowledgement() {
+  const auto body = boolean_dp(1, true);
+  const auto report = protocol_frame(0x44, DreoCommandType::DATAPOINT_REPORT, body, 2);
+  const auto acknowledgement = protocol_frame(0x44, DreoCommandType::DATAPOINT_REPORT, {}, 2);
+
+  Dreo disabled;
+  feed(disabled, report);
+  require(disabled.tx_bytes.empty(), "default configuration acknowledged a report");
+
+  Dreo enabled;
+  enabled.set_acknowledge_reports(true);
+  enabled.sequence_ = 9;
+  enabled.command_queue_.push_back(DreoCommand{.cmd = DreoCommandType::HEARTBEAT, .payload = {}});
+  feed(enabled, report);
+  require(enabled.tx_bytes == acknowledgement, "enabled report acknowledgement was not exact and same-sequence");
+  require(enabled.sequence_ == 9 && enabled.command_queue_.size() == 1 && !enabled.expected_response_.has_value(),
+          "report acknowledgement changed request state");
+
+  Dreo invalid;
+  invalid.set_acknowledge_reports(true);
+  auto corrupt_report = report;
+  corrupt_report.back() ^= 0x01;
+  feed(invalid, corrupt_report);
+  require(invalid.tx_bytes.empty(), "invalid report was acknowledged");
+
+  Dreo partial;
+  partial.set_acknowledge_reports(true);
+  feed(partial, std::vector<uint8_t>(report.begin(), report.end() - 1));
+  require(partial.tx_bytes.empty(), "partial report was acknowledged");
+
+  Dreo malformed_body;
+  malformed_body.set_acknowledge_reports(true);
+  malformed_body.sequence_ = 9;
+  malformed_body.command_queue_.push_back(DreoCommand{.cmd = DreoCommandType::HEARTBEAT, .payload = {}});
+  malformed_body.expected_response_ = DreoCommandType::DATAPOINT_REPORT;
+  auto incomplete_body = boolean_dp(1, true);
+  append(incomplete_body, {2, 1, 3, 0, 4, 'x'});
+  feed(malformed_body, protocol_frame(0x45, DreoCommandType::DATAPOINT_REPORT, incomplete_body));
+  require(malformed_body.tx_bytes.empty(), "structurally incomplete report body was acknowledged");
+  require(find_dp(malformed_body, 1) == nullptr, "structurally incomplete report published a valid prefix");
+  require(malformed_body.sequence_ == 9 && malformed_body.command_queue_.size() == 1 &&
+              malformed_body.expected_response_ == DreoCommandType::DATAPOINT_REPORT,
+          "structurally incomplete report changed request state");
+
+  Dreo unsupported_type;
+  unsupported_type.set_acknowledge_reports(true);
+  auto unsupported_body = boolean_dp(1, true);
+  append(unsupported_body, {2, 1, 0x7F, 0, 1, 0});
+  feed(unsupported_type, protocol_frame(0x46, DreoCommandType::DATAPOINT_REPORT, unsupported_body));
+  require(unsupported_type.tx_bytes.empty(), "unsupported datapoint type was acknowledged");
+  require(find_dp(unsupported_type, 1) == nullptr, "unsupported datapoint type published a valid prefix");
+
+  Dreo loop_control;
+  loop_control.set_acknowledge_reports(true);
+  feed(loop_control, acknowledgement);
+  require(loop_control.tx_bytes.empty(), "empty report acknowledgement formed an acknowledgement loop");
+}
+
+void test_module_reset_request() {
+  Dreo nonempty;
+  nonempty.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
+  feed(nonempty, protocol_frame(0x50, DreoCommandType::MODULE_RESET_REQUEST, {1}));
+  require(nonempty.tx_bytes.empty() && nonempty.init_state_ == esphome::dreo::DreoInitState::INIT_DONE,
+          "non-empty reset request was accepted");
+
+  Dreo reset;
+  reset.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
+  auto retained = boolean_dp(1, true);
+  reset.handle_datapoints_(retained.data(), retained.size());
+  reset.command_queue_.push_back(DreoCommand{.cmd = DreoCommandType::DATAPOINT_DELIVER, .payload = {1}});
+  reset.expected_response_ = DreoCommandType::DATAPOINT_REPORT;
+  reset.pending_transitions_.push_back(
+      {.command = {.datapoint_id = 1, .type = DreoDatapointType::BOOLEAN, .value_uint = 0}});
+  reset.reconciliation_route_ = esphome::dreo::DreoReconciliationRoute::TRANSITION;
+  reset.notification_reconciliation_due_ = 1234;
+  reset.reconciliation_attempts_ = 2;
+  reset.init_failed_ = true;
+  reset.init_retries_ = 4;
+  reset.sequence_ = 77;
+  int callbacks = 0;
+  reset.add_on_module_reset_request_callback([&callbacks] { callbacks++; });
+
+  const auto request = protocol_frame(0x51, DreoCommandType::MODULE_RESET_REQUEST, {}, 3);
+  const auto acknowledgement = protocol_frame(0x51, DreoCommandType::MODULE_RESET_REQUEST, {}, 3);
+  feed(reset, request);
+  require(reset.tx_bytes == acknowledgement, "module reset acknowledgement was not exact and same-sequence");
+  require(callbacks == 1, "module reset callback did not fire exactly once");
+  require(reset.command_queue_.empty() && !reset.expected_response_.has_value() && reset.pending_transitions_.empty(),
+          "module reset retained stale command work");
+  require(reset.reconciliation_route_ == esphome::dreo::DreoReconciliationRoute::NONE &&
+              reset.notification_reconciliation_due_ == 0 && reset.reconciliation_attempts_ == 0,
+          "module reset retained stale reconciliation work");
+  require(reset.init_state_ == esphome::dreo::DreoInitState::INIT_HEARTBEAT && !reset.init_failed_ &&
+              reset.init_retries_ == 0 && reset.sequence_ == 1,
+          "module reset did not reinitialize the protocol session");
+  require(find_dp(reset, 1) != nullptr && find_dp(reset, 1)->value_bool,
+          "module reset erased retained appliance state");
+
+  set_millis(5000);
+  feed(reset, protocol_frame(0x52, DreoCommandType::HEARTBEAT, {1}));
+  reset.process_command_queue_();
+  auto product_request = protocol_frame(1, DreoCommandType::PRODUCT_QUERY, {});
+  std::vector<uint8_t> expected = acknowledgement;
+  append(expected, product_request);
+  require(reset.tx_bytes == expected, "post-reset handshake did not restart at request sequence 1");
+  set_millis(0);
+}
+
+#endif
+
+std::string hex_string(const std::string &value) {
+  static constexpr char DIGITS[] = "0123456789ABCDEF";
+  std::string result;
+  result.reserve(value.size() * 2);
+  for (const unsigned char byte : value) {
+    result.push_back(DIGITS[byte >> 4]);
+    result.push_back(DIGITS[byte & 0x0F]);
+  }
+  return result;
+}
+
+void test_cross_model_complete_reports(bool emit_snapshots = false) {
+  struct ReportFixture {
+    const char *model;
+    const char *frame;
+    uint8_t sentinel_id;
+    size_t datapoint_count;
+  };
+
+  // These are checksum-valid, complete reports emitted by each supported
+  // model, with per-unit identifiers absent by construction. The HTF reports
+  // are the public examples retained in protocol/decode.py; the remaining
+  // reports are sanitized wire fixtures from their respective model tests.
+  const ReportFixture reports[] = {
+      {"DR-HTF018S",
+       "55AA00740700004B010001000101020001000100030004000102040004000105050001000101060002000400000000"
+       "0700020004000000C60800010001000900040001000B00020004000000520C000100010055",
+       12, 11},
+      {"DR-HTF024S",
+       "55AA000007000054010001000100020001000100030002000101040002000106050001000101060002000400000000"
+       "0700020004000000000800010001000900020001000B00020004000000520C00010001000D000200040000000030",
+       13, 12},
+      {"DR-HEC005S",
+       "55AA0000070000B001000100010002000100010103000100010004000200010105000200010C060002000102070002"
+       "00010108000200015A0900010001000A00020001000B0003000533302C37300C00020001030D00020004001EEBF70E"
+       "000200014B0F0002000400000000100002000400000000110002000400000000120001000100130002000104140002"
+       "000141160002000200001700010001001900010001001A00010001001B00010001001C00020004000000006D",
+       28, 26},
+      {"DR-HCF010S",
+       "55AA00000700009F010101000100030101000101040101000101050101000101060102000400000001070102000400"
+       "0000080801020004000000320901020004000000300F01020004000000001001020004000000001101020004000000"
+       "0012010200040000000013010100010114010200040000000015010200040000000016010100010017010200040000"
+       "00001901020004000000001A01020004000000041C0103000130DF",
+       28, 20},
+      {"DR-HPF007S",
+       "55AA0008070000DE010001000101020004000101040004000107050004000100060003001F74656D703A3233333333333334343434343436363636363638383838383839070003000D39302C34352C2D33302C2D34350800030003302C300900010001010A00010001010B00020004000000520C00020004000000000D00020004000000000E00010001000F0004000100110001000100120004000102130002000400000000140001000100150001000100160002000400000000170004000101180003000200001900020004002EFFA11A0002000400002B7B1B00010001001C00010001003B",
+       28, 26},
+  };
+
+  for (const auto &fixture : reports) {
+    Dreo dreo;
+    const auto frame = from_hex(fixture.frame);
+    feed(dreo, frame);
+    require(dreo.rx_message_.empty(), std::string(fixture.model) + " complete report remained buffered");
+    require(find_dp(dreo, 1) != nullptr, std::string(fixture.model) + " lost its first datapoint");
+    require(find_dp(dreo, fixture.sentinel_id) != nullptr,
+            std::string(fixture.model) + " did not retain its final datapoint");
+    require(dreo.datapoints_.size() == fixture.datapoint_count,
+            std::string(fixture.model) + " decoded a different datapoint count");
+    if (emit_snapshots) {
+      std::cout << fixture.model;
+      for (const auto &datapoint : dreo.datapoints_) {
+        std::cout << '|' << static_cast<unsigned>(datapoint.id) << ':'
+                  << static_cast<unsigned>(datapoint.type) << ':' << datapoint.len << ':';
+        switch (datapoint.type) {
+          case DreoDatapointType::BOOLEAN:
+            std::cout << datapoint.value_bool;
+            break;
+          case DreoDatapointType::INTEGER:
+            std::cout << datapoint.value_int;
+            break;
+          case DreoDatapointType::ENUM:
+            std::cout << static_cast<unsigned>(datapoint.value_enum);
+            break;
+          case DreoDatapointType::STRING:
+            std::cout << hex_string(datapoint.value_string);
+            break;
+          default:
+            std::cout << "unparsed";
+            break;
+        }
+      }
+      std::cout << '\n';
+    }
+  }
+}
+
+#ifdef DREO_FIXED_TESTS
+
 void require_integer(uint8_t id, const std::vector<uint8_t> &bytes, int32_t expected) {
   Dreo dreo;
   auto body = integer_dp(id, bytes);
@@ -2011,6 +2302,10 @@ void test_diagnostic_full_report_request() {
 }
 
 void run_fixed() {
+  test_stream_retransmission_recovery();
+  test_report_acknowledgement();
+  test_module_reset_request();
+  test_cross_model_complete_reports();
   test_core_parser_and_writer();
   test_light();
   test_text();
@@ -2048,6 +2343,11 @@ int main(int argc, char **argv) {
     return 0;
   }
 #endif
+  if (mode == "cross-model") {
+    test_cross_model_complete_reports(true);
+    std::cout << "PASS: exact complete reports for all supported models\n";
+    return 0;
+  }
   if (mode == "marker") {
     test_marker_default();
     std::cout << "PASS: product-source marker assertion\n";

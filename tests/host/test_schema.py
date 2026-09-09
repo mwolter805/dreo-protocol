@@ -61,6 +61,9 @@ class SenderOptionSchemaTest(SchemaTestBase):
     def test_wifi_status_second_byte_is_a_byte(self):
         self.expect_rejected("status-byte-too-large.yaml", "wifi_status_second_byte")
 
+    def test_report_acknowledgement_is_boolean(self):
+        self.expect_rejected("acknowledge-invalid.yaml", "boolean value")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,7 @@ enum class DreoCommandType : uint8_t {
   DATAPOINT_REPORT = 0x07,
   DATAPOINT_QUERY = 0x08,
   DATAPOINT_CHANGE_NOTIFICATION = 0x0E, // Can't decipher this so we'll ignore it
+  MODULE_RESET_REQUEST = 0x10,
 };
 
 
@@ -134,8 +135,12 @@ class Dreo final : public Component, public uart::UARTDevice {
   uint32_t get_command_spacing() const { return this->command_spacing_; }
   void set_wifi_status_second_byte(uint8_t value) { this->wifi_status_second_byte_ = value; }
   uint8_t get_wifi_status_second_byte() const { return this->wifi_status_second_byte_; }
+  void set_acknowledge_reports(bool acknowledge) { this->acknowledge_reports_ = acknowledge; }
   template<typename F> void add_on_initialized_callback(F &&callback) {
     this->initialized_callback_.add(std::forward<F>(callback));
+  }
+  template<typename F> void add_on_module_reset_request_callback(F &&callback) {
+    this->module_reset_request_callback_.add(std::forward<F>(callback));
   }
 
  private:
@@ -146,10 +151,16 @@ class Dreo final : public Component, public uart::UARTDevice {
   void handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report = false);
   optional<DreoDatapoint> get_datapoint_(uint8_t datapoint_id);
   optional<uint8_t> integer_command_width_(uint8_t datapoint_id) const;
-  bool validate_message_();
+  void process_rx_buffer_();
+  void reject_rx_candidate_();
+  bool report_body_is_valid_(const uint8_t *buffer, size_t len) const;
+  bool frame_warning_allowed_();
 
   void handle_command_(uint8_t command, uint8_t version, uint8_t sequence, const uint8_t *buffer, size_t len);
   void send_raw_command_(DreoCommand command);
+  void send_response_(DreoCommandType command, uint8_t version, uint8_t sequence,
+                      const std::vector<uint8_t> &payload = {});
+  void reset_protocol_session_();
   void process_command_queue_();
   void send_command_(const DreoCommand &command);
   void send_empty_command_(DreoCommandType command);
@@ -184,10 +195,12 @@ class Dreo final : public Component, public uart::UARTDevice {
   std::vector<DreoCommand> command_queue_;
   optional<DreoCommandType> expected_response_{};
   CallbackManager<void()> initialized_callback_{};
+  CallbackManager<void()> module_reset_request_callback_{};
   uint8_t sequence_ = 0;
   uint8_t command_datapoint_marker_ = 0;
   uint32_t command_spacing_{DEFAULT_COMMAND_SPACING_MS};
   uint8_t wifi_status_second_byte_{DEFAULT_WIFI_STATUS_SECOND_BYTE};
+  bool acknowledge_reports_{false};
   std::vector<std::pair<uint8_t, uint8_t>> integer_command_widths_{};
   bool allow_sub_entity_control_while_off_{false};
   std::function<bool(const DreoDatapointCommand &)> command_authorizer_{};
@@ -198,6 +211,8 @@ class Dreo final : public Component, public uart::UARTDevice {
   DreoReconciliationRoute reconciliation_route_{DreoReconciliationRoute::NONE};
   uint32_t notification_reconciliation_due_{0};
   uint8_t reconciliation_attempts_{0};
+  bool frame_warning_logged_{false};
+  uint32_t last_frame_warning_timestamp_{0};
 };
 
 }  // namespace esphome::dreo

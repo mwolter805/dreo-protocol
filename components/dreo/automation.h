@@ -35,6 +35,12 @@ class DreoEnumDatapointUpdateTrigger final : public Trigger<uint8_t> {
   explicit DreoEnumDatapointUpdateTrigger(Dreo *parent, uint8_t sensor_id);
 };
 
+class DreoModuleResetRequestTrigger final : public Trigger<> {
+ public:
+  explicit DreoModuleResetRequestTrigger(Dreo *parent) {
+    parent->add_on_module_reset_request_callback([this]() { this->trigger(); });
+  }
+};
+
 
 }  // namespace esphome::dreo
-

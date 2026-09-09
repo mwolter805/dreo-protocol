@@ -12,18 +12,23 @@ CONF_IGNORE_MCU_UPDATE_ON_DATAPOINTS = "ignore_mcu_update_on_datapoints"
 CONF_COMMAND_DATAPOINT_MARKER = "command_datapoint_marker"
 CONF_COMMAND_SPACING = "command_spacing"
 CONF_WIFI_STATUS_SECOND_BYTE = "wifi_status_second_byte"
+CONF_ACKNOWLEDGE_REPORTS = "acknowledge_reports"
 CONF_INTEGER_COMMAND_WIDTHS = "integer_command_widths"
 CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF = "allow_sub_entity_control_while_off"
 CONF_COMMAND_AUTHORIZER = "command_authorizer"
 CONF_TRANSITION_DATAPOINTS = "transition_datapoints"
 
 CONF_ON_DATAPOINT_UPDATE = "on_datapoint_update"
+CONF_ON_MODULE_RESET_REQUEST = "on_module_reset_request"
 CONF_DATAPOINT_TYPE = "datapoint_type"
 
 dreo_ns = cg.esphome_ns.namespace("dreo")
 DreoDatapointType = dreo_ns.enum("DreoDatapointType", is_class=True)
 Dreo = dreo_ns.class_("Dreo", cg.Component, uart.UARTDevice)
 DreoDatapointCommand = dreo_ns.struct("DreoDatapointCommand")
+DreoModuleResetRequestTrigger = dreo_ns.class_(
+    "DreoModuleResetRequestTrigger", automation.Trigger.template()
+)
 
 DPTYPE_ANY = "any"
 DPTYPE_BOOL = "bool"
@@ -90,6 +95,7 @@ CONFIG_SCHEMA = (
             # Second payload byte of the module status frame. The default keeps
             # the historical zero byte.
             cv.Optional(CONF_WIFI_STATUS_SECOND_BYTE, default=0): cv.uint8_t,
+            cv.Optional(CONF_ACKNOWLEDGE_REPORTS, default=False): cv.boolean,
             cv.Optional(CONF_INTEGER_COMMAND_WIDTHS, default={}): cv.Schema(
                 {cv.uint8_t: cv.one_of(1, 2, 4, int=True)}
             ),
@@ -111,6 +117,13 @@ CONFIG_SCHEMA = (
                 },
                 extra_validators=assign_declare_id,
             ),
+            cv.Optional(CONF_ON_MODULE_RESET_REQUEST): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        DreoModuleResetRequestTrigger
+                    ),
+                }
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -125,6 +138,7 @@ async def to_code(config):
     cg.add(var.set_command_datapoint_marker(config[CONF_COMMAND_DATAPOINT_MARKER]))
     cg.add(var.set_command_spacing(config[CONF_COMMAND_SPACING].total_milliseconds))
     cg.add(var.set_wifi_status_second_byte(config[CONF_WIFI_STATUS_SECOND_BYTE]))
+    cg.add(var.set_acknowledge_reports(config[CONF_ACKNOWLEDGE_REPORTS]))
     for datapoint_id, width in config[CONF_INTEGER_COMMAND_WIDTHS].items():
         cg.add(var.set_integer_command_width(datapoint_id, width))
     cg.add(
@@ -151,3 +165,6 @@ async def to_code(config):
         await automation.build_automation(
             trigger, [(DATAPOINT_TYPES[conf[CONF_DATAPOINT_TYPE]], "x")], conf
         )
+    for conf in config.get(CONF_ON_MODULE_RESET_REQUEST, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)

@@ -4,3 +4,7 @@ packages:
 dreo:
   command_spacing: 100ms
   wifi_status_second_byte: 1
+  acknowledge_reports: true
+  on_module_reset_request:
+    then:
+      - logger.log: "Dreo MCU requested a protocol-session reset"

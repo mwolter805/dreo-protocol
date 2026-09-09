@@ -17,6 +17,10 @@ static constexpr size_t MAX_STRING_DATAPOINT_BYTES = 255;
 static constexpr uint32_t COMMAND_REJECTION_LOG_INTERVAL = 1000;
 static constexpr uint32_t NOTIFICATION_RECONCILIATION_GRACE = 100;
 static constexpr uint8_t MAX_RECONCILIATION_ATTEMPTS = 2;
+// Larger than the largest supported report observed so far (226 bytes), while
+// keeping a corrupt length field from growing the receive buffer without bound.
+static constexpr size_t MAX_FRAME_BODY_BYTES = 512;
+static constexpr uint32_t FRAME_WARNING_LOG_INTERVAL = 1000;
 // Max bytes to log for datapoint values (larger values are truncated)
 static constexpr size_t MAX_DATAPOINT_LOG_BYTES = 16;
 
@@ -52,6 +56,7 @@ void Dreo::dump_config() {
                 YESNO(this->allow_sub_entity_control_while_off_));
   ESP_LOGCONFIG(TAG, "  Command spacing: %" PRIu32 " ms", this->command_spacing_);
   ESP_LOGCONFIG(TAG, "  Wi-Fi status second byte: %u", this->wifi_status_second_byte_);
+  ESP_LOGCONFIG(TAG, "  Acknowledge datapoint reports: %s", YESNO(this->acknowledge_reports_));
   if (this->init_state_ != DreoInitState::INIT_DONE) {
     if (this->init_failed_) {
       ESP_LOGCONFIG(TAG, "  Initialization failed. Current init_state: %u", static_cast<uint8_t>(this->init_state_));
@@ -78,86 +83,121 @@ void Dreo::dump_config() {
   ESP_LOGCONFIG(TAG, "  Product: '%s'", this->product_.c_str());
 }
 
-bool Dreo::validate_message_() {
-  uint32_t at = this->rx_message_.size() - 1;
-  auto *data = &this->rx_message_[0];
-  uint8_t new_byte = data[at];
-
-  // Byte 0: HEADER1 (always 0x55)
-  if (at == 0)
-    return new_byte == 0x55;
-  // Byte 1: HEADER2 (always 0xAA)
-  if (at == 1)
-    return new_byte == 0xAA;
-
-  // Byte 2: VERSION
-  // no validation for the following fields:
-  uint8_t version = data[2];
-  if (at == 2)
-    return true;
-
-  // Byte 3: SEQUENCE
-  uint8_t sequence = data[3];
-  if (at == 3)
-    return true;
-
-  // Byte 4: COMMAND
-  uint8_t command = data[4];
-  if (at == 4)
-    return true;
-
-  // Byte 5: Unknown (always 0)
-  if (at == 5)
-    return true;
-
-  // Byte 6: LENGTH1
-  // Byte 7: LENGTH2
-  if (at <= 7) {
-    // no validation for these fields
-    return true;
-  }
-
-  uint16_t length = (uint16_t(data[6]) << 8) | (uint16_t(data[7]));
-
-  // wait until all data is read
-  if (at - 8 < length)
-    return true;
-
-  // Byte 8+LEN: CHECKSUM - sum of all bytes (including header) modulo 256
-  uint8_t rx_checksum = new_byte;
-  uint8_t calc_checksum = 0;
-  for (uint32_t i = 0; i < 8 + length; i++)
-    calc_checksum += data[i];
-
-  if (rx_checksum != calc_checksum) {
-    ESP_LOGW(TAG, "Dreo Received invalid message checksum %02X!=%02X", rx_checksum, calc_checksum);
-    return false;
-  }
-
-  // valid message
-  const uint8_t *message_data = data + 8;
-#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
-  char hex_buf[format_hex_pretty_size(MAX_DATAPOINT_LOG_BYTES)];
-  ESP_LOGV(TAG, "Received Dreo: CMD=0x%02X VERSION=%u SEQUENCE=%u DATA=[%s] INIT_STATE=%u", command, version, sequence,
-           format_hex_pretty_to(hex_buf, message_data, length), static_cast<uint8_t>(this->init_state_));
-#endif
-  this->handle_command_(command, version, sequence, message_data, length);
-
-  // return false to reset rx buffer
-  return false;
-}
-
 void Dreo::handle_char_(uint8_t c) {
   this->rx_message_.push_back(c);
-  if (!this->validate_message_()) {
-    this->rx_message_.clear();
-  } else {
-    this->last_rx_char_timestamp_ = millis();
+  this->last_rx_char_timestamp_ = millis();
+  this->process_rx_buffer_();
+}
+
+bool Dreo::frame_warning_allowed_() {
+  const uint32_t now = millis();
+  if (this->frame_warning_logged_ && now - this->last_frame_warning_timestamp_ < FRAME_WARNING_LOG_INTERVAL)
+    return false;
+  this->frame_warning_logged_ = true;
+  this->last_frame_warning_timestamp_ = now;
+  return true;
+}
+
+void Dreo::reject_rx_candidate_() {
+  if (!this->rx_message_.empty())
+    this->rx_message_.erase(this->rx_message_.begin());
+}
+
+void Dreo::process_rx_buffer_() {
+  while (!this->rx_message_.empty()) {
+    auto first_header = std::find(this->rx_message_.begin(), this->rx_message_.end(), 0x55);
+    if (first_header == this->rx_message_.end()) {
+      this->rx_message_.clear();
+      return;
+    }
+    if (first_header != this->rx_message_.begin())
+      this->rx_message_.erase(this->rx_message_.begin(), first_header);
+
+    if (this->rx_message_.size() == 1)
+      return;
+    if (this->rx_message_[1] != 0xAA) {
+      this->reject_rx_candidate_();
+      continue;
+    }
+    if (this->rx_message_.size() < 8)
+      return;
+
+    const size_t length = (size_t(this->rx_message_[6]) << 8) | size_t(this->rx_message_[7]);
+    if (length > MAX_FRAME_BODY_BYTES) {
+      if (this->frame_warning_allowed_())
+        ESP_LOGW(TAG, "Rejecting Dreo frame body length %u above limit %u", (unsigned) length,
+                 (unsigned) MAX_FRAME_BODY_BYTES);
+      this->reject_rx_candidate_();
+      continue;
+    }
+
+    const size_t frame_size = 8 + length + 1;
+    if (this->rx_message_.size() < frame_size)
+      return;
+
+    uint8_t calc_checksum = 0;
+    for (size_t i = 0; i < frame_size - 1; i++)
+      calc_checksum += this->rx_message_[i];
+    const uint8_t rx_checksum = this->rx_message_[frame_size - 1];
+    if (rx_checksum != calc_checksum) {
+      if (this->frame_warning_allowed_())
+        ESP_LOGW(TAG, "Dreo Received invalid message checksum %02X!=%02X", rx_checksum, calc_checksum);
+      this->reject_rx_candidate_();
+      continue;
+    }
+
+    const uint8_t version = this->rx_message_[2];
+    const uint8_t sequence = this->rx_message_[3];
+    const uint8_t command = this->rx_message_[4];
+    const uint8_t *message_data = this->rx_message_.data() + 8;
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+    char hex_buf[format_hex_pretty_size(MAX_DATAPOINT_LOG_BYTES)];
+    ESP_LOGV(TAG, "Received Dreo: CMD=0x%02X VERSION=%u SEQUENCE=%u DATA=[%s] INIT_STATE=%u", command, version,
+             sequence, format_hex_pretty_to(hex_buf, message_data, length), static_cast<uint8_t>(this->init_state_));
+#endif
+    this->handle_command_(command, version, sequence, message_data, length);
+    this->rx_message_.erase(this->rx_message_.begin(), this->rx_message_.begin() + frame_size);
   }
+}
+
+bool Dreo::report_body_is_valid_(const uint8_t *buffer, size_t len) const {
+  if (buffer == nullptr || len == 0)
+    return false;
+  while (len >= 5) {
+    const auto type = static_cast<DreoDatapointType>(buffer[2]);
+    const size_t data_size = (size_t(buffer[3]) << 8) | size_t(buffer[4]);
+    if (data_size > len - 5)
+      return false;
+    switch (type) {
+      case DreoDatapointType::BOOLEAN:
+      case DreoDatapointType::ENUM:
+        if (data_size != 1)
+          return false;
+        break;
+      case DreoDatapointType::INTEGER:
+        if (data_size != 1 && data_size != 2 && data_size != 4)
+          return false;
+        break;
+      case DreoDatapointType::STRING:
+        if (data_size > MAX_STRING_DATAPOINT_BYTES)
+          return false;
+        break;
+      default:
+        return false;
+    }
+    buffer += data_size + 5;
+    len -= data_size + 5;
+  }
+  return len == 0;
 }
 
 void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, const uint8_t *buffer, size_t len) {
   DreoCommandType command_type = (DreoCommandType) command;
+  if (command_type == DreoCommandType::DATAPOINT_REPORT && len != 0 && !this->report_body_is_valid_(buffer, len)) {
+    if (this->frame_warning_allowed_())
+      ESP_LOGW(TAG, "Ignoring invalid datapoint report body");
+    return;
+  }
   DreoCommand completed_command{};
   bool completed_expected_response = false;
 
@@ -230,6 +270,8 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
       this->handle_datapoints_(
           buffer, len,
           completed_expected_response && completed_command.reconciliation_route == DreoReconciliationRoute::TRANSITION);
+      if (this->acknowledge_reports_ && this->report_body_is_valid_(buffer, len))
+        this->send_response_(DreoCommandType::DATAPOINT_REPORT, version, sequence);
       if (!this->has_pending_transitions_()) {
         this->cancel_reconciliation_(DreoReconciliationRoute::TRANSITION);
       } else if (completed_expected_response && completed_command.cmd == DreoCommandType::DATAPOINT_DELIVER) {
@@ -245,12 +287,6 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
         }
       }
 
-      // # if this was unsolicited, send a reply TODO
-      // The MCU doesn't seem to care that we don't ack its unsolicited reports, but we need to make sure this doesn't trigger a memory leak in it
-      // if (command_type == DreoCommandType::DATAPOINT_REPORT_SYNC) {
-      //   this->send_command_(
-      //       DreoCommand{.cmd = DreoCommandType::DATAPOINT_REPORT_ACK, .payload = std::vector<uint8_t>{0x01}});
-      // }
       break;
     case DreoCommandType::DATAPOINT_QUERY:
       break;
@@ -259,6 +295,15 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
       this->schedule_notification_reconciliation_();
       break;
     case DreoCommandType::WIFI_STATE:
+      break;
+    case DreoCommandType::MODULE_RESET_REQUEST:
+      if (len != 0) {
+        ESP_LOGW(TAG, "Ignoring non-empty module reset request");
+        break;
+      }
+      this->send_response_(DreoCommandType::MODULE_RESET_REQUEST, version, sequence);
+      this->reset_protocol_session_();
+      this->module_reset_request_callback_.call();
       break;
     default:
       ESP_LOGE(TAG, "Invalid command (0x%02X) received", command);
@@ -420,12 +465,51 @@ void Dreo::send_raw_command_(DreoCommand command) {
   this->write_byte(checksum);
 }
 
+void Dreo::send_response_(DreoCommandType command, uint8_t version, uint8_t sequence,
+                          const std::vector<uint8_t> &payload) {
+  const uint8_t len_hi = static_cast<uint8_t>(payload.size() >> 8);
+  const uint8_t len_lo = static_cast<uint8_t>(payload.size());
+  this->write_array({0x55, 0xAA, version, sequence, static_cast<uint8_t>(command), 0, len_hi, len_lo});
+  if (!payload.empty())
+    this->write_array(payload.data(), payload.size());
+
+  uint8_t checksum = 0x55 + 0xAA + version + sequence + static_cast<uint8_t>(command) + len_hi + len_lo;
+  for (uint8_t byte : payload)
+    checksum += byte;
+  this->write_byte(checksum);
+}
+
+void Dreo::reset_protocol_session_() {
+  this->command_queue_.clear();
+  this->expected_response_.reset();
+  this->pending_transitions_.clear();
+  this->reconciliation_route_ = DreoReconciliationRoute::NONE;
+  this->notification_reconciliation_due_ = 0;
+  this->reconciliation_attempts_ = 0;
+  this->init_state_ = DreoInitState::INIT_HEARTBEAT;
+  this->init_failed_ = false;
+  this->init_retries_ = 0;
+  this->protocol_version_ = -1;
+  this->sequence_ = 1;
+}
+
 void Dreo::process_command_queue_() {
   uint32_t now = millis();
   uint32_t delay = now - this->last_command_timestamp_;
 
-  if (now - this->last_rx_char_timestamp_ > RECEIVE_TIMEOUT) {
-    this->rx_message_.clear();
+  if (!this->rx_message_.empty() && now - this->last_rx_char_timestamp_ > RECEIVE_TIMEOUT) {
+    if (this->rx_message_.size() >= 8 && this->rx_message_[0] == 0x55 && this->rx_message_[1] == 0xAA) {
+      const size_t declared = (size_t(this->rx_message_[6]) << 8) | size_t(this->rx_message_[7]);
+      const size_t expected = 8 + declared + 1;
+      const size_t outstanding = expected > this->rx_message_.size() ? expected - this->rx_message_.size() : 0;
+      (void) outstanding;
+      if (this->frame_warning_allowed_())
+        ESP_LOGW(TAG, "Incomplete frame discarded after %d ms: declared body %u bytes, %u still outstanding",
+                 RECEIVE_TIMEOUT, (unsigned) declared, (unsigned) outstanding);
+    }
+    this->reject_rx_candidate_();
+    this->process_rx_buffer_();
+    this->last_rx_char_timestamp_ = now;
   }
 
   if (this->expected_response_.has_value() && delay > RECEIVE_TIMEOUT) {
