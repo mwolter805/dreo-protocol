@@ -764,6 +764,178 @@ void configure_hcf(Dreo &dreo, DreoCeilingFan &coordinator) {
   coordinator.setup();
 }
 
+const DreoDatapointCommand *pending_command(const Dreo &dreo, uint8_t datapoint_id) {
+  for (const auto &pending : dreo.pending_transitions_) {
+    if (pending.command.datapoint_id == datapoint_id)
+      return &pending.command;
+  }
+  return nullptr;
+}
+
+void require_pending_value(const Dreo &dreo, uint8_t datapoint_id, DreoDatapointType type, uint32_t value,
+                           const std::string &message) {
+  const auto *pending = pending_command(dreo, datapoint_id);
+  require(pending != nullptr && pending->type == type && pending->value_uint == value, message);
+}
+
+void control_hcf_power(DreoCeilingFan &coordinator, uint8_t child, bool state) {
+  if (child == 3)
+    coordinator.control_fan(state, !state, {}, {});
+  else if (child == 4)
+    coordinator.control_main_light(state, !state, {}, {});
+  else
+    coordinator.control_ambient(state);
+}
+
+void set_hcf_power_state(Dreo &dreo, uint8_t child, bool master, bool child_state, bool peer_state) {
+  const uint8_t peer = child == 3 ? 4 : 3;
+  set_hcf_state(dreo, master, child == 3 ? child_state : peer == 3 && peer_state,
+                child == 4 ? child_state : peer == 4 && peer_state, child == 5 && child_state);
+}
+
+void test_pending_transition_reversal_direct() {
+  struct NumericCase {
+    const char *name;
+    uint8_t id;
+    DreoDatapointType type;
+  };
+
+  for (const auto &test : {NumericCase{"boolean", 31, DreoDatapointType::BOOLEAN},
+                           NumericCase{"integer", 32, DreoDatapointType::INTEGER},
+                           NumericCase{"enum", 33, DreoDatapointType::ENUM}}) {
+    for (bool confirmed : {false, true}) {
+      Dreo dreo;
+      dreo.add_transition_datapoint(test.id);
+      std::vector<uint8_t> report;
+      if (test.type == DreoDatapointType::BOOLEAN)
+        report = boolean_dp(test.id, confirmed);
+      else if (test.type == DreoDatapointType::INTEGER)
+        report = integer_dp(test.id, {0, 0, 0, static_cast<uint8_t>(confirmed)});
+      else
+        report = enum_dp(test.id, static_cast<uint8_t>(confirmed));
+      size_t publications = 0;
+      dreo.register_listener(test.id, [&publications](DreoDatapoint) { publications++; });
+      dreo.handle_datapoints_(report.data(), report.size());
+      const size_t reports = publications;
+
+      const bool first = !confirmed;
+      bool accepted = false;
+      if (test.type == DreoDatapointType::BOOLEAN)
+        accepted = dreo.set_boolean_datapoint_value(test.id, first);
+      else if (test.type == DreoDatapointType::INTEGER)
+        accepted = dreo.set_integer_datapoint_value(test.id, first);
+      else
+        accepted = dreo.set_enum_datapoint_value(test.id, first);
+      require(accepted, std::string(test.name) + " initial transition was rejected");
+      require_pending_value(dreo, test.id, test.type, first,
+                            std::string(test.name) + " initial transition target was not tracked");
+
+      if (test.type == DreoDatapointType::BOOLEAN)
+        accepted = dreo.set_boolean_datapoint_value(test.id, confirmed);
+      else if (test.type == DreoDatapointType::INTEGER)
+        accepted = dreo.set_integer_datapoint_value(test.id, confirmed);
+      else
+        accepted = dreo.set_enum_datapoint_value(test.id, confirmed);
+      require(accepted, std::string(test.name) + " opposite transition was rejected");
+      require(queued_ids(dreo) == std::vector<uint8_t>({test.id, test.id}),
+              std::string(test.name) + " opposite transition did not emit exactly one replacement delivery");
+      require_pending_value(dreo, test.id, test.type, confirmed,
+                            std::string(test.name) + " opposite transition did not replace the pending target");
+      require(publications == reports, std::string(test.name) + " transition published state before an MCU report");
+    }
+  }
+
+  {
+    Dreo settled;
+    auto report = boolean_dp(40, false);
+    settled.handle_datapoints_(report.data(), report.size());
+    require(settled.set_boolean_datapoint_value(40, false), "settled unchanged control was rejected");
+    require(settled.command_queue_.empty(), "settled unchanged control emitted a delivery");
+  }
+  {
+    Dreo ordinary;
+    auto report = boolean_dp(41, false);
+    ordinary.handle_datapoints_(report.data(), report.size());
+    ordinary.pending_transitions_.push_back(
+        {.command = {.datapoint_id = 41, .type = DreoDatapointType::BOOLEAN, .value_uint = true}});
+    require(ordinary.set_boolean_datapoint_value(41, false), "non-transition control was rejected");
+    require(ordinary.command_queue_.empty(), "non-transition control bypassed unchanged suppression");
+  }
+  {
+    Dreo repeated;
+    repeated.add_transition_datapoint(42);
+    auto report = boolean_dp(42, false);
+    repeated.handle_datapoints_(report.data(), report.size());
+    require(repeated.set_boolean_datapoint_value(42, true), "same-target setup was rejected");
+    require(repeated.set_boolean_datapoint_value(42, true), "same-target repeat was rejected");
+    require(queued_ids(repeated) == std::vector<uint8_t>({42, 42}),
+            "same-target pending repeat changed its existing resend behavior");
+    require_pending_value(repeated, 42, DreoDatapointType::BOOLEAN, true,
+                          "same-target pending repeat changed its target");
+  }
+}
+
+void test_pending_transition_reversal_hcf_control() {
+  for (uint8_t child : {uint8_t{3}, uint8_t{4}, uint8_t{5}}) {
+    for (bool first_state : {false, true}) {
+      Dreo dreo;
+      DreoCeilingFan coordinator(&dreo);
+      configure_hcf(dreo, coordinator);
+      set_hcf_power_state(dreo, child, true, first_state, true);
+      dreo.command_queue_.clear();
+
+      control_hcf_power(coordinator, child, !first_state);
+      control_hcf_power(coordinator, child, first_state);
+      require(queued_ids(dreo) == std::vector<uint8_t>({child, child}),
+              "HCF child reversal did not emit exactly two child deliveries");
+      require_pending_value(dreo, child, DreoDatapointType::BOOLEAN, first_state,
+                            "HCF child reversal did not restore the final target");
+      require(dreo.get_boolean_datapoint_value(child).value_or(!first_state) == first_state,
+              "HCF child reversal published state before an MCU report");
+    }
+
+    for (bool first_state : {false, true}) {
+      Dreo dreo;
+      DreoCeilingFan coordinator(&dreo);
+      configure_hcf(dreo, coordinator);
+      set_hcf_power_state(dreo, child, first_state, first_state, false);
+      dreo.command_queue_.clear();
+
+      control_hcf_power(coordinator, child, !first_state);
+      control_hcf_power(coordinator, child, first_state);
+      require(queued_ids(dreo) ==
+                  (first_state ? std::vector<uint8_t>({1, 1}) : std::vector<uint8_t>({child, 1, 1})),
+              "HCF master reversal emitted the wrong power delivery sequence");
+      require_pending_value(dreo, 1, DreoDatapointType::BOOLEAN, first_state,
+                            "HCF master reversal did not restore the final target");
+      require(dreo.get_boolean_datapoint_value(1).value_or(!first_state) == first_state,
+              "HCF master reversal published state before an MCU report");
+    }
+
+    for (bool master_first : {false, true}) {
+      Dreo dreo;
+      DreoCeilingFan coordinator(&dreo);
+      configure_hcf(dreo, coordinator);
+      set_hcf_power_state(dreo, child, false, false, false);
+      dreo.command_queue_.clear();
+
+      control_hcf_power(coordinator, child, true);
+      control_hcf_power(coordinator, child, false);
+      require(queued_ids(dreo) == std::vector<uint8_t>({child, 1, 1}),
+              "HCF report-order reversal emitted the wrong power sequence");
+      auto first_report = boolean_dp(master_first ? 1 : child, master_first ? false : true);
+      dreo.handle_datapoints_(first_report.data(), first_report.size());
+      auto second_report = boolean_dp(master_first ? child : 1, master_first ? true : false);
+      dreo.handle_datapoints_(second_report.data(), second_report.size());
+      require(!dreo.is_datapoint_pending(1) && !dreo.is_datapoint_pending(child),
+              "HCF report order did not clear both final pending targets");
+      require(!dreo.get_boolean_datapoint_value(1).value_or(true) &&
+                  dreo.get_boolean_datapoint_value(child).value_or(false),
+              "HCF report order did not retain report-authoritative final state");
+    }
+  }
+}
+
 void test_ceiling_fan_coordinator() {
   for (bool master : {false, true}) {
     for (bool fan_child : {false, true}) {
@@ -1854,6 +2026,8 @@ void run_fixed() {
   test_wifi_status_senders();
   test_command_spacing_and_status_byte();
   test_diagnostic_full_report_request();
+  test_pending_transition_reversal_direct();
+  test_pending_transition_reversal_hcf_control();
   std::cout << "PASS: actual C++ sources satisfy parser, light, text, lock, guard, and legacy regressions\n";
 }
 #endif
@@ -1862,6 +2036,18 @@ void run_fixed() {
 
 int main(int argc, char **argv) {
   const std::string mode = argc > 1 ? argv[1] : "fixed";
+#ifdef DREO_FIXED_TESTS
+  if (mode == "pending-direct") {
+    test_pending_transition_reversal_direct();
+    std::cout << "PASS: direct pending-transition reversal controls\n";
+    return 0;
+  }
+  if (mode == "pending-hcf") {
+    test_pending_transition_reversal_hcf_control();
+    std::cout << "PASS: DR-HCF010S pending-transition reversal controls\n";
+    return 0;
+  }
+#endif
   if (mode == "marker") {
     test_marker_default();
     std::cout << "PASS: product-source marker assertion\n";

@@ -651,6 +651,14 @@ optional<bool> Dreo::get_boolean_datapoint_value(uint8_t datapoint_id) {
   return datapoint->value_bool;
 }
 
+optional<bool> Dreo::get_boolean_datapoint_target(uint8_t datapoint_id) {
+  for (const auto &pending : this->pending_transitions_) {
+    if (pending.command.datapoint_id == datapoint_id && pending.command.type == DreoDatapointType::BOOLEAN)
+      return static_cast<bool>(pending.command.value_uint);
+  }
+  return this->get_boolean_datapoint_value(datapoint_id);
+}
+
 bool Dreo::is_datapoint_pending(uint8_t datapoint_id) const {
   for (const auto &pending : this->pending_transitions_) {
     if (pending.command.datapoint_id == datapoint_id)
@@ -701,7 +709,7 @@ bool Dreo::set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType 
       default:
         break;
     }
-    if (!forced && unchanged) {
+    if (!forced && unchanged && !this->pending_transition_differs_(datapoint_id, datapoint_type, value)) {
       ESP_LOGV(TAG, "Not sending unchanged value");
       return true;
     }
@@ -775,6 +783,19 @@ bool Dreo::authorize_command_(const DreoDatapointCommand &command) {
     ESP_LOGW(TAG, "Datapoint %u command rejected by configured state policy", command.datapoint_id);
     this->last_rejected_datapoint_ = command.datapoint_id;
     this->last_rejection_log_timestamp_ = now;
+  }
+  return false;
+}
+
+bool Dreo::pending_transition_differs_(uint8_t datapoint_id, DreoDatapointType datapoint_type,
+                                       uint32_t value) const {
+  if (std::find(this->transition_datapoints_.begin(), this->transition_datapoints_.end(), datapoint_id) ==
+      this->transition_datapoints_.end())
+    return false;
+
+  for (const auto &pending : this->pending_transitions_) {
+    if (pending.command.datapoint_id == datapoint_id)
+      return pending.command.type == datapoint_type && pending.command.value_uint != value;
   }
   return false;
 }

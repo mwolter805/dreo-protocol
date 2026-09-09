@@ -114,6 +114,7 @@ class Dreo final : public Component, public uart::UARTDevice {
   void send_wifi_status_solid();
   bool request_full_datapoint_report_once();
   optional<bool> get_boolean_datapoint_value(uint8_t datapoint_id);
+  optional<bool> get_boolean_datapoint_target(uint8_t datapoint_id);
   bool is_datapoint_pending(uint8_t datapoint_id) const;
   void set_integer_command_width(uint8_t datapoint_id, uint8_t width);
   void set_allow_sub_entity_control_while_off(bool allow) {
@@ -157,6 +158,8 @@ class Dreo final : public Component, public uart::UARTDevice {
   bool set_string_datapoint_value_(uint8_t datapoint_id, const std::string &value, bool forced);
   bool send_datapoint_command_(const DreoDatapointCommand &command, std::vector<uint8_t> data);
   bool authorize_command_(const DreoDatapointCommand &command);
+  bool pending_transition_differs_(uint8_t datapoint_id, DreoDatapointType datapoint_type,
+                                   uint32_t value) const;
   void record_pending_transition_(const DreoDatapointCommand &command);
   void clear_confirmed_transition_(const DreoDatapoint &datapoint, bool authoritative);
   bool datapoint_confirms_command_(const DreoDatapoint &datapoint, const DreoDatapointCommand &command) const;

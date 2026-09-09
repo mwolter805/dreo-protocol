@@ -234,20 +234,24 @@ void DreoCeilingFan::handle_datapoint_(const dreo::DreoDatapoint &datapoint) {
 }
 
 void DreoCeilingFan::request_feature_state_(uint8_t child, bool state) {
+  const bool master_target = this->parent_->get_boolean_datapoint_target(DP_MASTER).value_or(false);
   if (!state) {
-    const bool fan_effective = this->master_.value_or(false) && this->fan_power_.value_or(false);
-    const bool light_effective = this->master_.value_or(false) && this->main_light_power_.value_or(false);
-    const bool ambient_effective = this->master_.value_or(false) && this->ambient_power_.value_or(false);
+    const bool fan_effective =
+        master_target && this->parent_->get_boolean_datapoint_target(DP_FAN_POWER).value_or(false);
+    const bool light_effective =
+        master_target && this->parent_->get_boolean_datapoint_target(DP_MAIN_LIGHT_POWER).value_or(false);
+    const bool ambient_effective =
+        master_target && this->parent_->get_boolean_datapoint_target(DP_AMBIENT_POWER).value_or(false);
     const unsigned active = static_cast<unsigned>(fan_effective) + static_cast<unsigned>(light_effective) +
                             static_cast<unsigned>(ambient_effective);
-    if (active <= 1 && this->master_.value_or(false))
+    if (active <= 1 && master_target)
       this->parent_->set_boolean_datapoint_value(DP_MASTER, false);
     else
       this->parent_->set_boolean_datapoint_value(child, false);
     return;
   }
 
-  if (!this->master_.value_or(false)) {
+  if (!master_target) {
     for (uint8_t other : {DP_FAN_POWER, DP_MAIN_LIGHT_POWER, DP_AMBIENT_POWER}) {
       if (other != child)
         this->parent_->set_boolean_datapoint_value(other, false);
@@ -264,13 +268,16 @@ void DreoCeilingFan::control_fan(bool turn_on, bool turn_off, optional<uint8_t> 
     this->request_feature_state_(DP_FAN_POWER, false);
     return;
   }
-  const bool effective = this->master_.value_or(false) && this->fan_power_.value_or(false);
-  if (turn_on && !effective) {
+  const bool effective = this->parent_->get_boolean_datapoint_target(DP_MASTER).value_or(false) &&
+                         this->parent_->get_boolean_datapoint_target(DP_FAN_POWER).value_or(false);
+  const bool power_pending =
+      this->parent_->is_datapoint_pending(DP_MASTER) || this->parent_->is_datapoint_pending(DP_FAN_POWER);
+  if (turn_on && (!effective || power_pending)) {
     if (speed.has_value())
       this->queued_fan_speed_ = speed;
     if (mode.has_value())
       this->queued_fan_mode_ = mode;
-    if (!this->parent_->is_datapoint_pending(DP_MASTER) && !this->parent_->is_datapoint_pending(DP_FAN_POWER))
+    if (!effective)
       this->request_feature_state_(DP_FAN_POWER, true);
     return;
   }
@@ -290,14 +297,16 @@ void DreoCeilingFan::control_main_light(bool turn_on, bool turn_off, optional<ui
     this->request_feature_state_(DP_MAIN_LIGHT_POWER, false);
     return;
   }
-  const bool effective = this->master_.value_or(false) && this->main_light_power_.value_or(false);
-  if (turn_on && !effective) {
+  const bool effective = this->parent_->get_boolean_datapoint_target(DP_MASTER).value_or(false) &&
+                         this->parent_->get_boolean_datapoint_target(DP_MAIN_LIGHT_POWER).value_or(false);
+  const bool power_pending = this->parent_->is_datapoint_pending(DP_MASTER) ||
+                             this->parent_->is_datapoint_pending(DP_MAIN_LIGHT_POWER);
+  if (turn_on && (!effective || power_pending)) {
     if (brightness.has_value())
       this->queued_main_light_brightness_ = brightness;
     if (color_temperature.has_value())
       this->queued_main_light_color_temperature_ = color_temperature;
-    if (!this->parent_->is_datapoint_pending(DP_MASTER) &&
-        !this->parent_->is_datapoint_pending(DP_MAIN_LIGHT_POWER))
+    if (!effective)
       this->request_feature_state_(DP_MAIN_LIGHT_POWER, true);
     return;
   }
