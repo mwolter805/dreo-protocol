@@ -8,3 +8,8 @@ dreo:
   on_module_reset_request:
     then:
       - logger.log: "Dreo MCU requested a protocol-session reset"
+  on_button_event:
+    then:
+      - lambda: |-
+          ESP_LOGD("dreo.button", "origin=%u duration=%u button=%u", x.origin,
+                   x.duration_seconds, x.button_id);

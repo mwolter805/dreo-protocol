@@ -42,5 +42,12 @@ class DreoModuleResetRequestTrigger final : public Trigger<> {
   }
 };
 
+class DreoButtonEventTrigger final : public Trigger<DreoButtonEvent> {
+ public:
+  explicit DreoButtonEventTrigger(Dreo *parent) {
+    parent->add_on_button_event_callback([this](const DreoButtonEvent &event) { this->trigger(event); });
+  }
+};
+
 
 }  // namespace esphome::dreo

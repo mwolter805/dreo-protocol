@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "esphome/core/controller_registry.h"
+
 #define protected public
 #include "components/dreo/dreo.h"
 #include "components/dreo/binary_sensor/dreo_binary_sensor.h"
@@ -20,6 +22,7 @@
 #include "components/dreo/select/dreo_select.h"
 #include "components/dreo/switch/dreo_switch.h"
 #include "components/dreo/text/dreo_text.h"
+#include "components/dreo/text_sensor/dreo_text_sensor.h"
 #include "components/dreo_ceiling_fan/dreo_ceiling_fan.h"
 #include "components/dreo_ceiling_fan/fan/dreo_ceiling_fan_fan.h"
 #include "components/dreo_ceiling_fan/light/dreo_ceiling_fan_light.h"
@@ -42,6 +45,7 @@ using esphome::dreo::DreoNumber;
 using esphome::dreo::DreoSelect;
 using esphome::dreo::DreoSwitch;
 using esphome::dreo::DreoText;
+using esphome::dreo::DreoTextSensor;
 using esphome::dreo_ceiling_fan::AMBIENT_PRESET_COUNT;
 using esphome::dreo_ceiling_fan::DreoCeilingFan;
 using esphome::dreo_ceiling_fan::DreoCeilingFanFan;
@@ -358,7 +362,6 @@ void test_module_reset_request() {
   reset.pending_transitions_.push_back(
       {.command = {.datapoint_id = 1, .type = DreoDatapointType::BOOLEAN, .value_uint = 0}});
   reset.reconciliation_route_ = esphome::dreo::DreoReconciliationRoute::TRANSITION;
-  reset.notification_reconciliation_due_ = 1234;
   reset.reconciliation_attempts_ = 2;
   reset.init_failed_ = true;
   reset.init_retries_ = 4;
@@ -374,7 +377,7 @@ void test_module_reset_request() {
   require(reset.command_queue_.empty() && !reset.expected_response_.has_value() && reset.pending_transitions_.empty(),
           "module reset retained stale command work");
   require(reset.reconciliation_route_ == esphome::dreo::DreoReconciliationRoute::NONE &&
-              reset.notification_reconciliation_due_ == 0 && reset.reconciliation_attempts_ == 0,
+              reset.reconciliation_attempts_ == 0,
           "module reset retained stale reconciliation work");
   require(reset.init_state_ == esphome::dreo::DreoInitState::INIT_HEARTBEAT && !reset.init_failed_ &&
               reset.init_retries_ == 0 && reset.sequence_ == 1,
@@ -801,6 +804,26 @@ void test_text() {
   }
 }
 
+void test_read_only_text_sensor_invalidation() {
+  Dreo dreo;
+  DreoTextSensor sensor;
+  sensor.set_dreo_parent(&dreo);
+  sensor.set_text_id(24);
+  sensor.setup();
+  auto report = string_dp(24, "1,15");
+  dreo.handle_datapoints_(report.data(), report.size());
+  require(sensor.has_state() && sensor.state == "1,15" && sensor.publish_count == 1,
+          "read-only text sensor lost its reported string");
+
+  esphome::ControllerRegistry::notify_count = 0;
+  esphome::ControllerRegistry::last_missing_state = false;
+  sensor.invalidate_state();
+  require(!sensor.has_state(), "text sensor invalidation retained internal state availability");
+  require(esphome::ControllerRegistry::notify_count == 1 && esphome::ControllerRegistry::last_missing_state,
+          "text sensor invalidation did not notify controllers with missing_state=true");
+  require(dreo.command_queue_.empty() && dreo.tx_bytes.empty(), "read-only text sensor exposed a write path");
+}
+
 void test_lock() {
   Dreo dreo;
   dreo.set_command_datapoint_marker(1);
@@ -1163,6 +1186,88 @@ void test_pending_transition_reversal_direct() {
             "same-target pending repeat changed its existing resend behavior");
     require_pending_value(repeated, 42, DreoDatapointType::BOOLEAN, true,
                           "same-target pending repeat changed its target");
+  }
+}
+
+void test_atomic_datapoint_batches() {
+  {
+    Dreo dreo;
+    dreo.set_command_datapoint_marker(1);
+    dreo.set_integer_command_width(12, 4);
+    set_millis(1000);
+    const std::vector<DreoDatapointCommand> commands{
+        {.datapoint_id = 2, .type = DreoDatapointType::ENUM, .value_uint = 5},
+        {.datapoint_id = 6, .type = DreoDatapointType::STRING, .value_string = "temp:012345"},
+        {.datapoint_id = 12, .type = DreoDatapointType::INTEGER, .value_uint = 0x01020304},
+    };
+    require(dreo.set_datapoint_values(commands), "ordered mixed batch was rejected");
+    std::vector<uint8_t> body;
+    append(body, command_payload(2, 1, DreoDatapointType::ENUM, {5}));
+    append(body, command_payload(6, 1, DreoDatapointType::STRING,
+                                 std::vector<uint8_t>{'t', 'e', 'm', 'p', ':', '0', '1', '2', '3', '4', '5'}));
+    append(body, command_payload(12, 1, DreoDatapointType::INTEGER, {1, 2, 3, 4}));
+    require(dreo.tx_bytes == protocol_frame(0, DreoCommandType::DATAPOINT_DELIVER, body),
+            "mixed batch changed item order, width, frame length, or checksum");
+    require(count_serialized_command(dreo.tx_bytes, 0x06) == 1, "mixed batch emitted more than one frame");
+  }
+  {
+    Dreo dreo;
+    std::vector<DreoDatapointCommand> commands;
+    std::vector<uint8_t> expected_body;
+    for (uint8_t id = 30; id < 40; id++) {
+      commands.push_back({.datapoint_id = id, .type = DreoDatapointType::INTEGER, .value_uint = id, .length = 1});
+      append(expected_body, command_payload(id, 0, DreoDatapointType::INTEGER, {id}));
+    }
+    require(dreo.set_datapoint_values(commands), "ten-item capacity batch was rejected");
+    require(dreo.tx_bytes == protocol_frame(0, DreoCommandType::DATAPOINT_DELIVER, expected_body),
+            "ten-item batch was not serialized exactly once");
+  }
+  {
+    Dreo dreo;
+    dreo.add_transition_datapoint(1);
+    dreo.add_transition_datapoint(3);
+    auto off1 = boolean_dp(1, false);
+    auto off3 = boolean_dp(3, false);
+    dreo.handle_datapoints_(off1.data(), off1.size());
+    dreo.handle_datapoints_(off3.data(), off3.size());
+    require(dreo.set_boolean_datapoint_value(1, true), "pending reversal setup was rejected");
+    require(dreo.set_datapoint_values({
+                {.datapoint_id = 1, .type = DreoDatapointType::BOOLEAN, .value_uint = false},
+                {.datapoint_id = 3, .type = DreoDatapointType::BOOLEAN, .value_uint = true},
+            }),
+            "pending reversal batch was rejected");
+    require(dreo.command_queue_.size() == 2, "pending reversal batch did not add exactly one delivery");
+    require_pending_value(dreo, 1, DreoDatapointType::BOOLEAN, false,
+                          "batch did not replace the opposite pending target");
+    require_pending_value(dreo, 3, DreoDatapointType::BOOLEAN, true,
+                          "batch did not record the second pending target");
+    dreo.handle_datapoints_(off1.data(), off1.size());
+    require(!dreo.is_datapoint_pending(1) && dreo.is_datapoint_pending(3),
+            "one report did not clear its batch transition independently");
+  }
+  {
+    Dreo dreo;
+    dreo.add_transition_datapoint(1);
+    dreo.add_transition_datapoint(3);
+    dreo.set_command_authorizer([](const DreoDatapointCommand &command) { return command.datapoint_id != 3; });
+    require(!dreo.set_datapoint_values({
+                {.datapoint_id = 1, .type = DreoDatapointType::BOOLEAN, .value_uint = true},
+                {.datapoint_id = 3, .type = DreoDatapointType::BOOLEAN, .value_uint = true},
+            }),
+            "partially unauthorized batch was accepted");
+    require(dreo.command_queue_.empty() && dreo.pending_transitions_.empty() && dreo.tx_bytes.empty(),
+            "rejected batch sent bytes or recorded a transition");
+    require(!dreo.set_datapoint_values({
+                {.datapoint_id = 4, .type = DreoDatapointType::ENUM, .value_uint = 1},
+                {.datapoint_id = 4, .type = DreoDatapointType::ENUM, .value_uint = 2},
+            }),
+            "duplicate datapoint batch was accepted");
+    require(!dreo.set_datapoint_values({
+                {.datapoint_id = 5, .type = DreoDatapointType::BOOLEAN, .value_uint = 2},
+            }),
+            "invalid boolean batch was accepted");
+    require(dreo.command_queue_.empty() && dreo.pending_transitions_.empty() && dreo.tx_bytes.empty(),
+            "invalid batch mutated command state");
   }
 }
 
@@ -1917,52 +2022,31 @@ void test_masked_binary_sensor_and_number_clamp() {
   require(dreo.command_queue_.empty(), "inbound number reports emitted a corrective command");
 }
 
+void test_button_events() {
+  Dreo dreo;
+  size_t events = 0;
+  esphome::dreo::DreoButtonEvent received{};
+  dreo.add_on_button_event_callback([&](const esphome::dreo::DreoButtonEvent &event) {
+    events++;
+    received = event;
+  });
+
+  const uint8_t valid[]{2, 4, 7};
+  dreo.handle_command_(static_cast<uint8_t>(DreoCommandType::BUTTON_EVENT), 0, 12, valid, sizeof(valid));
+  require(events == 1 && received.origin == 2 && received.duration_seconds == 4 && received.button_id == 7,
+          "exact button event did not publish its numeric fields");
+  require(dreo.command_queue_.empty() && dreo.tx_bytes.empty(), "button event emitted a synthetic query");
+
+  const uint8_t short_body[]{1, 2};
+  const uint8_t long_body[]{1, 2, 3, 4};
+  dreo.handle_command_(static_cast<uint8_t>(DreoCommandType::BUTTON_EVENT), 0, 13, nullptr, 0);
+  dreo.handle_command_(static_cast<uint8_t>(DreoCommandType::BUTTON_EVENT), 0, 14, short_body, sizeof(short_body));
+  dreo.handle_command_(static_cast<uint8_t>(DreoCommandType::BUTTON_EVENT), 0, 15, long_body, sizeof(long_body));
+  require(events == 1 && dreo.command_queue_.empty() && dreo.tx_bytes.empty(),
+          "malformed button event published or emitted a query");
+}
+
 void test_reconciliation_scheduler() {
-  {
-    Dreo dreo;
-    dreo.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
-    set_millis(1000);
-    dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_CHANGE_NOTIFICATION), 0, 0,
-                         nullptr, 0);
-    auto report = boolean_dp(1, false);
-    dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_REPORT), 0, 0,
-                         report.data(), report.size());
-    advance_millis(101);
-    dreo.process_command_queue_();
-    require(dreo.command_queue_.empty() && dreo.tx_bytes.empty(),
-            "unsolicited full report did not cancel notification readback");
-  }
-  {
-    Dreo dreo;
-    dreo.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
-    set_millis(2000);
-    dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_CHANGE_NOTIFICATION), 0, 0,
-                         nullptr, 0);
-    advance_millis(50);
-    dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_CHANGE_NOTIFICATION), 0, 0,
-                         nullptr, 0);
-    advance_millis(99);
-    dreo.process_command_queue_();
-    require(dreo.tx_bytes.empty(), "notification burst did not restart the grace interval");
-    advance_millis(2);
-    dreo.process_command_queue_();
-    require(dreo.command_queue_.size() == 1 &&
-                dreo.command_queue_.front().cmd == esphome::dreo::DreoCommandType::DATAPOINT_REPORT &&
-                dreo.command_queue_.front().payload.empty(),
-            "unfulfilled notification did not serialize an empty 0x07");
-    require(count_serialized_command(dreo.tx_bytes, 0x07) == 1,
-            "notification reconciliation did not send exactly one first attempt");
-    advance_millis(301);
-    dreo.process_command_queue_();
-    require(count_serialized_command(dreo.tx_bytes, 0x07) == 2,
-            "notification reconciliation did not make its one bounded retry");
-    advance_millis(301);
-    dreo.process_command_queue_();
-    require(dreo.command_queue_.empty() && !dreo.expected_response_.has_value(),
-            "notification reconciliation remained queued after two attempts");
-    require(count_serialized_command(dreo.tx_bytes, 0x07) == 2,
-            "notification reconciliation exceeded two attempts");
-  }
   {
     Dreo dreo;
     dreo.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
@@ -2019,15 +2103,11 @@ void test_reconciliation_scheduler() {
     auto off = boolean_dp(1, false);
     dreo.handle_datapoints_(off.data(), off.size());
     set_millis(5000);
-    dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_CHANGE_NOTIFICATION), 0, 0,
-                         nullptr, 0);
     require(dreo.force_set_boolean_datapoint_value(1, true), "transition command was rejected");
     advance_millis(301);
     dreo.process_command_queue_();
     require(dreo.command_queue_.front().cmd == esphome::dreo::DreoCommandType::DATAPOINT_QUERY,
             "missing transition report did not serialize 0x08");
-    require(count_serialized_command(dreo.tx_bytes, 0x07) == 0,
-            "transition work did not supersede notification reconciliation");
     auto contrary = boolean_dp(1, false);
     dreo.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_REPORT), 0, 0,
                          contrary.data(), contrary.size());
@@ -2232,11 +2312,9 @@ void test_diagnostic_full_report_request() {
   pending.pending_transitions_.push_back({});
   require(!pending.request_full_datapoint_report_once(), "request bypassed pending transition state");
   pending.pending_transitions_.clear();
-  pending.reconciliation_route_ = esphome::dreo::DreoReconciliationRoute::NOTIFICATION;
+  pending.reconciliation_route_ = esphome::dreo::DreoReconciliationRoute::TRANSITION;
   require(!pending.request_full_datapoint_report_once(), "request bypassed active reconciliation state");
   pending.reconciliation_route_ = esphome::dreo::DreoReconciliationRoute::NONE;
-  pending.notification_reconciliation_due_ = 1;
-  require(!pending.request_full_datapoint_report_once(), "request bypassed scheduled notification state");
 
   Dreo completed;
   completed.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
@@ -2283,22 +2361,6 @@ void test_diagnostic_full_report_request() {
               timed_out.reconciliation_attempts_ == 0,
           "full-table timeout changed reconciliation state");
 
-  Dreo notification;
-  notification.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
-  notification.handle_datapoints_(full_report.data(), full_report.size());
-  set_millis(60000);
-  require(notification.request_full_datapoint_report_once(), "notification overlap fixture request was rejected");
-  notification.handle_command_(
-      static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_CHANGE_NOTIFICATION), 0, 0, nullptr, 0);
-  const uint32_t notification_due = notification.notification_reconciliation_due_;
-  require(notification.reconciliation_route_ == esphome::dreo::DreoReconciliationRoute::NOTIFICATION &&
-              notification_due != 0,
-          "notification overlap did not establish normal reconciliation state");
-  notification.handle_command_(static_cast<uint8_t>(esphome::dreo::DreoCommandType::DATAPOINT_REPORT), 0, 0,
-                               full_report.data(), full_report.size());
-  require(notification.reconciliation_route_ == esphome::dreo::DreoReconciliationRoute::NOTIFICATION &&
-              notification.notification_reconciliation_due_ == notification_due,
-          "diagnostic response cancelled normal notification reconciliation");
 }
 
 void run_fixed() {
@@ -2309,6 +2371,7 @@ void run_fixed() {
   test_core_parser_and_writer();
   test_light();
   test_text();
+  test_read_only_text_sensor_invalidation();
   test_lock();
   test_guard();
   test_subordinate_control_policy();
@@ -2316,12 +2379,14 @@ void run_fixed() {
   test_ceiling_fan_ambient_presets();
   test_existing_platform_type_safety();
   test_masked_binary_sensor_and_number_clamp();
+  test_button_events();
   test_reconciliation_scheduler();
   test_transition_switch_and_off_effect();
   test_wifi_status_senders();
   test_command_spacing_and_status_byte();
   test_diagnostic_full_report_request();
   test_pending_transition_reversal_direct();
+  test_atomic_datapoint_batches();
   test_pending_transition_reversal_hcf_control();
   std::cout << "PASS: actual C++ sources satisfy parser, light, text, lock, guard, and legacy regressions\n";
 }

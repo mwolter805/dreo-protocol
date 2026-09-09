@@ -20,6 +20,7 @@ HEADER = struct.Struct(">2sBBBBH")
 #                        H len
 
 HEADER_MAGIC = b"\x55\xaa"
+MAX_FRAME_BODY_BYTES = 512
 
 
 @dataclass
@@ -144,10 +145,15 @@ def cmd_report_status(body: bytes):
             print(f"    dpId {dp.dpid} ({dpid_name(dp.dpid)}): {dpid_type_name(dp.dp_type)} = {dp.value}")
 
 
-def cmd_dp_changed(body: bytes):
-    # a DP has just been changed on the panel; the data seems to not make much sense, but we've just received a status
-    # report anyway so we can ignore this
-    print(f"DP changed {body.hex()}")
+def cmd_button_event(body: bytes):
+    if len(body) != 3:
+        print(f"Malformed button event ({len(body)} bytes): {body.hex()}")
+        return
+    origin, duration_seconds, button_id = body
+    print(
+        "Button event: "
+        f"origin={origin}, duration_seconds={duration_seconds}, button_id={button_id}"
+    )
 
 
 def cmd_change_dp(body: bytes):
@@ -179,10 +185,14 @@ def cmd_change_dp(body: bytes):
 def decode_packet(label: str, packet: bytes):
     hdr = parse_header(packet)
 
-    body = packet[HEADER.size : HEADER.size + hdr.length]
+    if hdr.length > MAX_FRAME_BODY_BYTES:
+        raise ValueError(f"Body length {hdr.length} exceeds {MAX_FRAME_BODY_BYTES}")
 
-    if len(body) < hdr.length:
+    packet_size = HEADER.size + hdr.length + 1
+    if len(packet) < packet_size:
         raise IncompletePacketException()
+
+    body = packet[HEADER.size : HEADER.size + hdr.length]
 
     print("Packet: " + packet[0 : HEADER.size + hdr.length + 1].hex())
 
@@ -215,18 +225,20 @@ def decode_packet(label: str, packet: bytes):
         cmd_report_status(body)
     elif hdr.command == 0x08:  # Query status
         print("Request immediate status report")
-    elif hdr.command == 0x0E:  # dp changed (not tuya standard)
-        cmd_dp_changed(body)
+    elif hdr.command == 0x0E:  # physical-input event (not Tuya standard)
+        cmd_button_event(body)
+    elif hdr.command == 0x10:  # module protocol-session reset
+        print("Module reset request/ack" if len(body) == 0 else f"Malformed module reset {body.hex()}")
     else:
         print(f"body length {len(body)}")
         pprint(body.hex())
         print(f"Unknown command 0x{hdr.command:02x}")
 
-    return packet[HEADER.size + hdr.length + 1 :]
+    return packet[packet_size:]
 
 
 def decode_datastream(label: str, data: bytes):
-    try:
+    while data:
         while len(data) >= 2 and data[0:2] != HEADER_MAGIC:
             print(f"[{label}] skip byte 0x{data[0]:02x} waiting for header magic")
             data = data[1:]
@@ -234,10 +246,21 @@ def decode_datastream(label: str, data: bytes):
         if len(data) < HEADER.size:
             return data
 
-        while len(data) > 0:
+        hdr = parse_header(data)
+        packet_size = HEADER.size + hdr.length + 1
+        if hdr.length <= MAX_FRAME_BODY_BYTES and len(data) < packet_size:
+            next_header = data.find(HEADER_MAGIC, 2)
+            if next_header < 0:
+                return data
+            print(f"[{label}] abandoned incomplete frame; resuming at next complete header")
+            data = data[next_header:]
+            continue
+
+        try:
             data = decode_packet(label, data)
-    except IncompletePacketException:
-        return data
+        except (IncompletePacketException, ValueError) as err:
+            print(f"[{label}] reject frame candidate: {err}")
+            data = data[1:]
     return bytes()
 
 

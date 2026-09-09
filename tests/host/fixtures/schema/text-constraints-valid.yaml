@@ -1,0 +1,17 @@
+packages:
+  base: !include widths-omitted.yaml
+
+text:
+  - platform: dreo
+    id: custom_curve
+    name: Custom Curve
+    text_datapoint: 6
+    min_length: 5
+    max_length: 64
+    pattern: "^temp:[0-9]+$"
+
+text_sensor:
+  - platform: dreo
+    id: target_zone
+    name: Target Zone
+    text_datapoint: 24

@@ -64,6 +64,19 @@ class SenderOptionSchemaTest(SchemaTestBase):
     def test_report_acknowledgement_is_boolean(self):
         self.expect_rejected("acknowledge-invalid.yaml", "boolean value")
 
+    def test_numeric_button_event_automation_is_valid(self):
+        self.expect_valid("sender-valid.yaml")
+
+
+class StringAdapterSchemaTest(SchemaTestBase):
+    def test_configurable_writable_and_read_only_strings_are_valid(self):
+        self.expect_valid("text-constraints-valid.yaml")
+
+    def test_minimum_length_cannot_exceed_maximum(self):
+        self.expect_rejected(
+            "text-constraints-invalid.yaml", "min_length must not exceed max_length"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

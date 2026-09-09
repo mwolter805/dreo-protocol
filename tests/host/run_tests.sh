@@ -37,7 +37,7 @@ else
   fi
 fi
 
-cxxflags="-std=c++17 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer"
+cxxflags="-std=c++17 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -DUSE_TEXT_SENSOR -DUSE_CONTROLLER_REGISTRY"
 if [ "$mode" = fixed ]; then
   cxxflags="$cxxflags -DDREO_FIXED_TESTS"
 fi
@@ -55,6 +55,7 @@ c++ $cxxflags \
   "$root/components/dreo/switch/dreo_switch.cpp" \
   "$root/components/dreo/binary_sensor/dreo_binary_sensor.cpp" \
   "$root/components/dreo/text/dreo_text.cpp" \
+  "$root/components/dreo/text_sensor/dreo_text_sensor.cpp" \
   "$root/components/dreo_ceiling_fan/dreo_ceiling_fan.cpp" \
   "$root/components/dreo_ceiling_fan/fan/dreo_ceiling_fan_fan.cpp" \
   "$root/components/dreo_ceiling_fan/light/dreo_ceiling_fan_light.cpp" \

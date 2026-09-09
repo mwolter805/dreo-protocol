@@ -20,14 +20,19 @@ CONF_TRANSITION_DATAPOINTS = "transition_datapoints"
 
 CONF_ON_DATAPOINT_UPDATE = "on_datapoint_update"
 CONF_ON_MODULE_RESET_REQUEST = "on_module_reset_request"
+CONF_ON_BUTTON_EVENT = "on_button_event"
 CONF_DATAPOINT_TYPE = "datapoint_type"
 
 dreo_ns = cg.esphome_ns.namespace("dreo")
 DreoDatapointType = dreo_ns.enum("DreoDatapointType", is_class=True)
 Dreo = dreo_ns.class_("Dreo", cg.Component, uart.UARTDevice)
 DreoDatapointCommand = dreo_ns.struct("DreoDatapointCommand")
+DreoButtonEvent = dreo_ns.struct("DreoButtonEvent")
 DreoModuleResetRequestTrigger = dreo_ns.class_(
     "DreoModuleResetRequestTrigger", automation.Trigger.template()
+)
+DreoButtonEventTrigger = dreo_ns.class_(
+    "DreoButtonEventTrigger", automation.Trigger.template(DreoButtonEvent)
 )
 
 DPTYPE_ANY = "any"
@@ -124,6 +129,13 @@ CONFIG_SCHEMA = (
                     ),
                 }
             ),
+            cv.Optional(CONF_ON_BUTTON_EVENT): automation.validate_automation(
+                {
+                    cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                        DreoButtonEventTrigger
+                    ),
+                }
+            ),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -168,3 +180,6 @@ async def to_code(config):
     for conf in config.get(CONF_ON_MODULE_RESET_REQUEST, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
+    for conf in config.get(CONF_ON_BUTTON_EVENT, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [(DreoButtonEvent, "x")], conf)

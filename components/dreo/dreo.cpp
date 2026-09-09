@@ -15,7 +15,6 @@ static const int RECEIVE_TIMEOUT = 300;
 static const int MAX_RETRIES = 5;
 static constexpr size_t MAX_STRING_DATAPOINT_BYTES = 255;
 static constexpr uint32_t COMMAND_REJECTION_LOG_INTERVAL = 1000;
-static constexpr uint32_t NOTIFICATION_RECONCILIATION_GRACE = 100;
 static constexpr uint8_t MAX_RECONCILIATION_ATTEMPTS = 2;
 // Larger than the largest supported report observed so far (226 bytes), while
 // keeping a corrupt length field from growing the receive buffer without bound.
@@ -259,9 +258,6 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
     case DreoCommandType::DATAPOINT_DELIVER:
       break;
     case DreoCommandType::DATAPOINT_REPORT:
-      if (this->reconciliation_route_ == DreoReconciliationRoute::NOTIFICATION &&
-          !(completed_expected_response && completed_command.diagnostic_full_report))
-        this->cancel_reconciliation_(DreoReconciliationRoute::NOTIFICATION);
       if (this->init_state_ == DreoInitState::INIT_DATAPOINT) {
         this->init_state_ = DreoInitState::INIT_DONE;
         this->set_timeout("datapoint_dump", 1000, [this] { this->dump_config(); });
@@ -290,9 +286,16 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
       break;
     case DreoCommandType::DATAPOINT_QUERY:
       break;
-    case DreoCommandType::DATAPOINT_CHANGE_NOTIFICATION:
-      ESP_LOGD(TAG, "MCU informed us of datapoints changing"); // contents make no sense, they don't include the dpId or value
-      this->schedule_notification_reconciliation_();
+    case DreoCommandType::BUTTON_EVENT:
+      if (len != 3) {
+        ESP_LOGW(TAG, "Ignoring malformed button event with %zu bytes", len);
+        break;
+      }
+      this->button_event_callback_.call(DreoButtonEvent{
+          .origin = buffer[0],
+          .duration_seconds = buffer[1],
+          .button_id = buffer[2],
+      });
       break;
     case DreoCommandType::WIFI_STATE:
       break;
@@ -437,7 +440,7 @@ void Dreo::send_raw_command_(DreoCommand command) {
       this->expected_response_ = DreoCommandType::DATAPOINT_REPORT;
       break;
     case DreoCommandType::DATAPOINT_REPORT:
-      if (command.reconciliation_route == DreoReconciliationRoute::NOTIFICATION || command.diagnostic_full_report)
+      if (command.diagnostic_full_report)
         this->expected_response_ = DreoCommandType::DATAPOINT_REPORT;
       break;
     case DreoCommandType::WIFI_STATE:
@@ -484,7 +487,6 @@ void Dreo::reset_protocol_session_() {
   this->expected_response_.reset();
   this->pending_transitions_.clear();
   this->reconciliation_route_ = DreoReconciliationRoute::NONE;
-  this->notification_reconciliation_due_ = 0;
   this->reconciliation_attempts_ = 0;
   this->init_state_ = DreoInitState::INIT_HEARTBEAT;
   this->init_failed_ = false;
@@ -548,13 +550,6 @@ void Dreo::process_command_queue_() {
     }
   }
 
-  if (this->reconciliation_route_ == DreoReconciliationRoute::NOTIFICATION &&
-      this->notification_reconciliation_due_ != 0 &&
-      static_cast<int32_t>(now - this->notification_reconciliation_due_) >= 0) {
-    this->notification_reconciliation_due_ = 0;
-    this->queue_reconciliation_request_(DreoReconciliationRoute::NOTIFICATION);
-  }
-
   // Left check of delay since last command in case there's ever a command sent by calling send_raw_command_ directly
   if (delay > this->command_spacing_ && !this->command_queue_.empty() && this->rx_message_.empty() &&
       !this->expected_response_.has_value()) {
@@ -575,19 +570,9 @@ void Dreo::send_empty_command_(DreoCommandType command) {
   send_command_(DreoCommand{.cmd = command, .payload = std::vector<uint8_t>{}});
 }
 
-void Dreo::schedule_notification_reconciliation_() {
-  if (this->has_pending_transitions_() || this->reconciliation_route_ == DreoReconciliationRoute::TRANSITION)
-    return;
-  this->cancel_reconciliation_(DreoReconciliationRoute::NOTIFICATION);
-  this->reconciliation_route_ = DreoReconciliationRoute::NOTIFICATION;
-  this->reconciliation_attempts_ = 0;
-  this->notification_reconciliation_due_ = millis() + NOTIFICATION_RECONCILIATION_GRACE;
-}
-
 void Dreo::schedule_transition_reconciliation_() {
   if (!this->has_pending_transitions_())
     return;
-  this->cancel_reconciliation_(DreoReconciliationRoute::NOTIFICATION);
   if (this->reconciliation_route_ == DreoReconciliationRoute::TRANSITION)
     return;
   this->reconciliation_route_ = DreoReconciliationRoute::TRANSITION;
@@ -613,9 +598,6 @@ void Dreo::queue_reconciliation_request_(DreoReconciliationRoute route) {
 }
 
 void Dreo::cancel_reconciliation_(DreoReconciliationRoute route) {
-  this->notification_reconciliation_due_ = route == DreoReconciliationRoute::NOTIFICATION
-                                                ? 0
-                                                : this->notification_reconciliation_due_;
   for (auto it = this->command_queue_.begin(); it != this->command_queue_.end();) {
     bool active = it == this->command_queue_.begin() && this->expected_response_.has_value();
     if (!active && it->reconciliation_route == route)
@@ -633,35 +615,51 @@ void Dreo::cancel_reconciliation_(DreoReconciliationRoute route) {
 
 
 bool Dreo::set_boolean_datapoint_value(uint8_t datapoint_id, bool value) {
-  return this->set_numeric_datapoint_value_(datapoint_id, DreoDatapointType::BOOLEAN, value, 1, false);
+  return this->set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::BOOLEAN, .value_uint = value, .length = 1}});
 }
 
 bool Dreo::set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value) {
-  return this->set_numeric_datapoint_value_(datapoint_id, DreoDatapointType::INTEGER, value, 4, false);
+  return this->set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::INTEGER, .value_uint = value, .length = 4}});
 }
 
 bool Dreo::set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value) {
-  return this->set_numeric_datapoint_value_(datapoint_id, DreoDatapointType::ENUM, value, 1, false);
+  return this->set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::ENUM, .value_uint = value, .length = 1}});
 }
 
 bool Dreo::set_string_datapoint_value(uint8_t datapoint_id, const std::string &value) {
-  return this->set_string_datapoint_value_(datapoint_id, value, false);
+  return this->set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::STRING, .value_string = value}});
 }
 
 bool Dreo::force_set_boolean_datapoint_value(uint8_t datapoint_id, bool value) {
-  return this->set_numeric_datapoint_value_(datapoint_id, DreoDatapointType::BOOLEAN, value, 1, true);
+  return this->force_set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::BOOLEAN, .value_uint = value, .length = 1}});
 }
 
 bool Dreo::force_set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value) {
-  return this->set_numeric_datapoint_value_(datapoint_id, DreoDatapointType::INTEGER, value, 4, true);
+  return this->force_set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::INTEGER, .value_uint = value, .length = 4}});
 }
 
 bool Dreo::force_set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value) {
-  return this->set_numeric_datapoint_value_(datapoint_id, DreoDatapointType::ENUM, value, 1, true);
+  return this->force_set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::ENUM, .value_uint = value, .length = 1}});
 }
 
 bool Dreo::force_set_string_datapoint_value(uint8_t datapoint_id, const std::string &value) {
-  return this->set_string_datapoint_value_(datapoint_id, value, true);
+  return this->force_set_datapoint_values({DreoDatapointCommand{
+      .datapoint_id = datapoint_id, .type = DreoDatapointType::STRING, .value_string = value}});
+}
+
+bool Dreo::set_datapoint_values(const std::vector<DreoDatapointCommand> &commands) {
+  return this->set_datapoint_values_(commands, false);
+}
+
+bool Dreo::force_set_datapoint_values(const std::vector<DreoDatapointCommand> &commands) {
+  return this->set_datapoint_values_(commands, true);
 }
 
 void Dreo::send_wifi_status_off() {
@@ -684,7 +682,7 @@ void Dreo::send_wifi_status_(uint8_t status) {
 bool Dreo::request_full_datapoint_report_once() {
   if (this->init_state_ != DreoInitState::INIT_DONE || this->datapoints_.empty() || !this->command_queue_.empty() ||
       this->expected_response_.has_value() || this->has_pending_transitions_() ||
-      this->reconciliation_route_ != DreoReconciliationRoute::NONE || this->notification_reconciliation_due_ != 0)
+      this->reconciliation_route_ != DreoReconciliationRoute::NONE)
     return false;
   this->send_command_(DreoCommand{
       .cmd = DreoCommandType::DATAPOINT_REPORT,
@@ -771,90 +769,122 @@ optional<uint8_t> Dreo::integer_command_width_(uint8_t datapoint_id) const {
 
 bool Dreo::set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType datapoint_type,
                                         const uint32_t value, uint8_t length, bool forced) {
-  ESP_LOGD(TAG, "Setting datapoint %u to %" PRIu32, datapoint_id, value);
-  optional<DreoDatapoint> datapoint = this->get_datapoint_(datapoint_id);
-  if (!datapoint.has_value()) {
-    ESP_LOGW(TAG, "Setting unknown datapoint %u", datapoint_id);
-  } else if (datapoint->type != datapoint_type) {
-    ESP_LOGE(TAG, "Attempt to set datapoint %u with incorrect type", datapoint_id);
-    return false;
-  } else {
-    bool unchanged = false;
-    switch (datapoint_type) {
-      case DreoDatapointType::BOOLEAN:
-        unchanged = datapoint->value_bool == static_cast<bool>(value);
-        break;
-      case DreoDatapointType::INTEGER:
-        unchanged = datapoint->value_int == static_cast<int32_t>(value);
-        break;
-      case DreoDatapointType::ENUM:
-        unchanged = datapoint->value_enum == static_cast<uint8_t>(value);
-        break;
-      default:
-        break;
-    }
-    if (!forced && unchanged && !this->pending_transition_differs_(datapoint_id, datapoint_type, value)) {
-      ESP_LOGV(TAG, "Not sending unchanged value");
-      return true;
-    }
-  }
-
-  if (datapoint_type == DreoDatapointType::INTEGER) {
-    auto configured = this->integer_command_width_(datapoint_id);
-    if (configured.has_value())
-      length = *configured;
-    else if (datapoint.has_value())
-      length = datapoint->len;
-  }
-
-  std::vector<uint8_t> data;
-  switch (length) {
-    case 4:
-      data.push_back(value >> 24);
-      data.push_back(value >> 16);
-      [[fallthrough]];
-    case 2:
-      data.push_back(value >> 8);
-      [[fallthrough]];
-    case 1:
-      data.push_back(value >> 0);
-      break;
-    default:
-      ESP_LOGE(TAG, "Unexpected datapoint length %u", length);
-      return false;
-  }
   DreoDatapointCommand command{
-      .datapoint_id = datapoint_id,
-      .type = datapoint_type,
-      .value_uint = value,
-  };
-  return this->send_datapoint_command_(command, std::move(data));
+      .datapoint_id = datapoint_id, .type = datapoint_type, .value_uint = value, .length = length};
+  return this->set_datapoint_values_({command}, forced);
 }
 
 bool Dreo::set_string_datapoint_value_(uint8_t datapoint_id, const std::string &value, bool forced) {
-  if (value.size() > MAX_STRING_DATAPOINT_BYTES) {
-    ESP_LOGE(TAG, "Datapoint %u string is too long (%zu > %zu)", datapoint_id, value.size(),
-             MAX_STRING_DATAPOINT_BYTES);
-    return false;
-  }
-
-  optional<DreoDatapoint> datapoint = this->get_datapoint_(datapoint_id);
-  if (!datapoint.has_value()) {
-    ESP_LOGW(TAG, "Setting unknown datapoint %u", datapoint_id);
-  } else if (datapoint->type != DreoDatapointType::STRING) {
-    ESP_LOGE(TAG, "Attempt to set datapoint %u with incorrect type", datapoint_id);
-    return false;
-  } else if (!forced && datapoint->value_string == value) {
-    ESP_LOGV(TAG, "Not sending unchanged string value");
-    return true;
-  }
-
   DreoDatapointCommand command{
       .datapoint_id = datapoint_id,
       .type = DreoDatapointType::STRING,
       .value_string = value,
   };
-  return this->send_datapoint_command_(command, std::vector<uint8_t>(value.begin(), value.end()));
+  return this->set_datapoint_values_({command}, forced);
+}
+
+bool Dreo::set_datapoint_values_(const std::vector<DreoDatapointCommand> &commands, bool forced) {
+  if (commands.empty()) {
+    ESP_LOGE(TAG, "Cannot send an empty datapoint batch");
+    return false;
+  }
+
+  std::vector<uint8_t> seen_ids;
+  std::vector<DreoPreparedDatapointCommand> prepared;
+  prepared.reserve(commands.size());
+  bool needs_send = forced;
+  for (const auto &command : commands) {
+    if (std::find(seen_ids.begin(), seen_ids.end(), command.datapoint_id) != seen_ids.end()) {
+      ESP_LOGE(TAG, "Datapoint %u appears more than once in a batch", command.datapoint_id);
+      return false;
+    }
+    seen_ids.push_back(command.datapoint_id);
+    DreoPreparedDatapointCommand item{};
+    bool item_needs_send = false;
+    if (!this->prepare_datapoint_command_(command, forced, item, item_needs_send))
+      return false;
+    needs_send = needs_send || item_needs_send;
+    prepared.push_back(std::move(item));
+  }
+
+  if (!needs_send) {
+    ESP_LOGV(TAG, "Not sending unchanged datapoint batch");
+    return true;
+  }
+  return this->send_datapoint_commands_(prepared);
+}
+
+bool Dreo::prepare_datapoint_command_(const DreoDatapointCommand &command, bool forced,
+                                      DreoPreparedDatapointCommand &prepared, bool &needs_send) {
+  optional<DreoDatapoint> datapoint = this->get_datapoint_(command.datapoint_id);
+  if (!datapoint.has_value()) {
+    ESP_LOGW(TAG, "Setting unknown datapoint %u", command.datapoint_id);
+  } else if (datapoint->type != command.type) {
+    ESP_LOGE(TAG, "Attempt to set datapoint %u with incorrect type", command.datapoint_id);
+    return false;
+  }
+
+  prepared.command = command;
+  bool unchanged = false;
+  switch (command.type) {
+    case DreoDatapointType::BOOLEAN:
+      if (command.value_uint > 1) {
+        ESP_LOGE(TAG, "Boolean datapoint %u has invalid value %" PRIu32, command.datapoint_id, command.value_uint);
+        return false;
+      }
+      prepared.data = {static_cast<uint8_t>(command.value_uint)};
+      unchanged = datapoint.has_value() && datapoint->value_bool == static_cast<bool>(command.value_uint);
+      break;
+    case DreoDatapointType::INTEGER: {
+      uint8_t length = command.length == 0 ? 4 : command.length;
+      auto configured = this->integer_command_width_(command.datapoint_id);
+      if (configured.has_value())
+        length = *configured;
+      else if (datapoint.has_value())
+        length = datapoint->len;
+      prepared.command.length = length;
+      switch (length) {
+        case 4:
+          prepared.data.push_back(command.value_uint >> 24);
+          prepared.data.push_back(command.value_uint >> 16);
+          [[fallthrough]];
+        case 2:
+          prepared.data.push_back(command.value_uint >> 8);
+          [[fallthrough]];
+        case 1:
+          prepared.data.push_back(command.value_uint);
+          break;
+        default:
+          ESP_LOGE(TAG, "Unexpected datapoint length %u", length);
+          return false;
+      }
+      unchanged = datapoint.has_value() && datapoint->value_int == static_cast<int32_t>(command.value_uint);
+      break;
+    }
+    case DreoDatapointType::ENUM:
+      if (command.value_uint > UINT8_MAX) {
+        ESP_LOGE(TAG, "Enum datapoint %u has invalid value %" PRIu32, command.datapoint_id, command.value_uint);
+        return false;
+      }
+      prepared.data = {static_cast<uint8_t>(command.value_uint)};
+      unchanged = datapoint.has_value() && datapoint->value_enum == static_cast<uint8_t>(command.value_uint);
+      break;
+    case DreoDatapointType::STRING:
+      if (command.value_string.size() > MAX_STRING_DATAPOINT_BYTES) {
+        ESP_LOGE(TAG, "Datapoint %u string is too long (%zu > %zu)", command.datapoint_id,
+                 command.value_string.size(), MAX_STRING_DATAPOINT_BYTES);
+        return false;
+      }
+      prepared.data.assign(command.value_string.begin(), command.value_string.end());
+      unchanged = datapoint.has_value() && datapoint->value_string == command.value_string;
+      break;
+    default:
+      ESP_LOGE(TAG, "Unsupported datapoint type %u", static_cast<uint8_t>(command.type));
+      return false;
+  }
+
+  needs_send = forced || !unchanged || this->pending_transition_differs_(command);
+  return true;
 }
 
 bool Dreo::authorize_command_(const DreoDatapointCommand &command) {
@@ -871,15 +901,17 @@ bool Dreo::authorize_command_(const DreoDatapointCommand &command) {
   return false;
 }
 
-bool Dreo::pending_transition_differs_(uint8_t datapoint_id, DreoDatapointType datapoint_type,
-                                       uint32_t value) const {
-  if (std::find(this->transition_datapoints_.begin(), this->transition_datapoints_.end(), datapoint_id) ==
+bool Dreo::pending_transition_differs_(const DreoDatapointCommand &command) const {
+  if (std::find(this->transition_datapoints_.begin(), this->transition_datapoints_.end(), command.datapoint_id) ==
       this->transition_datapoints_.end())
     return false;
 
   for (const auto &pending : this->pending_transitions_) {
-    if (pending.command.datapoint_id == datapoint_id)
-      return pending.command.type == datapoint_type && pending.command.value_uint != value;
+    if (pending.command.datapoint_id != command.datapoint_id || pending.command.type != command.type)
+      continue;
+    if (command.type == DreoDatapointType::STRING)
+      return pending.command.value_string != command.value_string;
+    return pending.command.value_uint != command.value_uint;
   }
   return false;
 }
@@ -888,8 +920,6 @@ void Dreo::record_pending_transition_(const DreoDatapointCommand &command) {
   if (std::find(this->transition_datapoints_.begin(), this->transition_datapoints_.end(), command.datapoint_id) ==
       this->transition_datapoints_.end())
     return;
-
-  this->cancel_reconciliation_(DreoReconciliationRoute::NOTIFICATION);
 
   for (auto &pending : this->pending_transitions_) {
     if (pending.command.datapoint_id == command.datapoint_id) {
@@ -929,18 +959,34 @@ void Dreo::clear_confirmed_transition_(const DreoDatapoint &datapoint, bool auth
 }
 
 bool Dreo::send_datapoint_command_(const DreoDatapointCommand &command, std::vector<uint8_t> data) {
-  if (!this->authorize_command_(command))
-    return false;
+  return this->send_datapoint_commands_({DreoPreparedDatapointCommand{.command = command, .data = std::move(data)}});
+}
+
+bool Dreo::send_datapoint_commands_(const std::vector<DreoPreparedDatapointCommand> &commands) {
+  size_t body_size = 0;
+  for (const auto &item : commands) {
+    if (!this->authorize_command_(item.command))
+      return false;
+    body_size += 5 + item.data.size();
+    if (body_size > UINT16_MAX) {
+      ESP_LOGE(TAG, "Datapoint batch body is too long (%zu > %u)", body_size, UINT16_MAX);
+      return false;
+    }
+  }
 
   std::vector<uint8_t> buffer;
-  buffer.push_back(command.datapoint_id);
-  buffer.push_back(this->command_datapoint_marker_);
-  buffer.push_back(static_cast<uint8_t>(command.type));
-  buffer.push_back(data.size() >> 8);
-  buffer.push_back(data.size() >> 0);
-  buffer.insert(buffer.end(), data.begin(), data.end());
+  buffer.reserve(body_size);
+  for (const auto &item : commands) {
+    buffer.push_back(item.command.datapoint_id);
+    buffer.push_back(this->command_datapoint_marker_);
+    buffer.push_back(static_cast<uint8_t>(item.command.type));
+    buffer.push_back(item.data.size() >> 8);
+    buffer.push_back(item.data.size());
+    buffer.insert(buffer.end(), item.data.begin(), item.data.end());
+  }
 
-  this->record_pending_transition_(command);
+  for (const auto &item : commands)
+    this->record_pending_transition_(item.command);
   this->send_command_(DreoCommand{.cmd = DreoCommandType::DATAPOINT_DELIVER, .payload = buffer});
   return true;
 }

@@ -49,6 +49,12 @@ struct DreoDatapointCommand {
   DreoDatapointType type;
   uint32_t value_uint{0};
   std::string value_string;
+  uint8_t length{0};
+};
+
+struct DreoPreparedDatapointCommand {
+  DreoDatapointCommand command;
+  std::vector<uint8_t> data;
 };
 
 struct DreoPendingTransition {
@@ -60,6 +66,12 @@ struct DreoDatapointListener {
   std::function<void(DreoDatapoint)> on_datapoint;
 };
 
+struct DreoButtonEvent {
+  uint8_t origin;
+  uint8_t duration_seconds;
+  uint8_t button_id;
+};
+
 enum class DreoCommandType : uint8_t {
   HEARTBEAT = 0x00,
   PRODUCT_QUERY = 0x01,
@@ -68,7 +80,7 @@ enum class DreoCommandType : uint8_t {
   DATAPOINT_DELIVER = 0x06,
   DATAPOINT_REPORT = 0x07,
   DATAPOINT_QUERY = 0x08,
-  DATAPOINT_CHANGE_NOTIFICATION = 0x0E, // Can't decipher this so we'll ignore it
+  BUTTON_EVENT = 0x0E,
   MODULE_RESET_REQUEST = 0x10,
 };
 
@@ -84,7 +96,6 @@ enum class DreoInitState : uint8_t {
 
 enum class DreoReconciliationRoute : uint8_t {
   NONE = 0,
-  NOTIFICATION,
   TRANSITION,
 };
 
@@ -110,6 +121,8 @@ class Dreo final : public Component, public uart::UARTDevice {
   bool force_set_integer_datapoint_value(uint8_t datapoint_id, uint32_t value);
   bool force_set_enum_datapoint_value(uint8_t datapoint_id, uint8_t value);
   bool force_set_string_datapoint_value(uint8_t datapoint_id, const std::string &value);
+  bool set_datapoint_values(const std::vector<DreoDatapointCommand> &commands);
+  bool force_set_datapoint_values(const std::vector<DreoDatapointCommand> &commands);
   void send_wifi_status_off();
   void send_wifi_status_flash();
   void send_wifi_status_solid();
@@ -142,6 +155,9 @@ class Dreo final : public Component, public uart::UARTDevice {
   template<typename F> void add_on_module_reset_request_callback(F &&callback) {
     this->module_reset_request_callback_.add(std::forward<F>(callback));
   }
+  template<typename F> void add_on_button_event_callback(F &&callback) {
+    this->button_event_callback_.add(std::forward<F>(callback));
+  }
 
  private:
   void send_wifi_status_(uint8_t status);
@@ -167,14 +183,16 @@ class Dreo final : public Component, public uart::UARTDevice {
   bool set_numeric_datapoint_value_(uint8_t datapoint_id, DreoDatapointType datapoint_type, uint32_t value,
                                     uint8_t length, bool forced);
   bool set_string_datapoint_value_(uint8_t datapoint_id, const std::string &value, bool forced);
+  bool set_datapoint_values_(const std::vector<DreoDatapointCommand> &commands, bool forced);
+  bool prepare_datapoint_command_(const DreoDatapointCommand &command, bool forced,
+                                  DreoPreparedDatapointCommand &prepared, bool &needs_send);
+  bool send_datapoint_commands_(const std::vector<DreoPreparedDatapointCommand> &commands);
   bool send_datapoint_command_(const DreoDatapointCommand &command, std::vector<uint8_t> data);
   bool authorize_command_(const DreoDatapointCommand &command);
-  bool pending_transition_differs_(uint8_t datapoint_id, DreoDatapointType datapoint_type,
-                                   uint32_t value) const;
+  bool pending_transition_differs_(const DreoDatapointCommand &command) const;
   void record_pending_transition_(const DreoDatapointCommand &command);
   void clear_confirmed_transition_(const DreoDatapoint &datapoint, bool authoritative);
   bool datapoint_confirms_command_(const DreoDatapoint &datapoint, const DreoDatapointCommand &command) const;
-  void schedule_notification_reconciliation_();
   void schedule_transition_reconciliation_();
   void queue_reconciliation_request_(DreoReconciliationRoute route);
   void cancel_reconciliation_(DreoReconciliationRoute route);
@@ -196,6 +214,7 @@ class Dreo final : public Component, public uart::UARTDevice {
   optional<DreoCommandType> expected_response_{};
   CallbackManager<void()> initialized_callback_{};
   CallbackManager<void()> module_reset_request_callback_{};
+  CallbackManager<void(DreoButtonEvent)> button_event_callback_{};
   uint8_t sequence_ = 0;
   uint8_t command_datapoint_marker_ = 0;
   uint32_t command_spacing_{DEFAULT_COMMAND_SPACING_MS};
@@ -209,7 +228,6 @@ class Dreo final : public Component, public uart::UARTDevice {
   uint8_t last_rejected_datapoint_{0xFF};
   uint32_t last_rejection_log_timestamp_{0};
   DreoReconciliationRoute reconciliation_route_{DreoReconciliationRoute::NONE};
-  uint32_t notification_reconciliation_due_{0};
   uint8_t reconciliation_attempts_{0};
   bool frame_warning_logged_{false};
   uint32_t last_frame_warning_timestamp_{0};

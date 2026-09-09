@@ -1,0 +1,10 @@
+packages:
+  base: !include widths-omitted.yaml
+
+text:
+  - platform: dreo
+    id: invalid_lengths
+    name: Invalid Lengths
+    text_datapoint: 6
+    min_length: 10
+    max_length: 5

@@ -160,7 +160,6 @@ interval:
             "this->expected_response_.has_value()",
             "this->has_pending_transitions_()",
             "this->reconciliation_route_ != DreoReconciliationRoute::NONE",
-            "this->notification_reconciliation_due_ != 0",
         ):
             self.assertIn(guard, request.group("body"))
         self.assertIn(".cmd = DreoCommandType::DATAPOINT_REPORT", request.group("body"))
