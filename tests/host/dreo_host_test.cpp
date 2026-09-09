@@ -26,6 +26,14 @@
 #include "components/dreo_ceiling_fan/dreo_ceiling_fan.h"
 #include "components/dreo_ceiling_fan/fan/dreo_ceiling_fan_fan.h"
 #include "components/dreo_ceiling_fan/light/dreo_ceiling_fan_light.h"
+#include "components/dreo_hpf007s/dreo_hpf007s.h"
+#include "components/dreo_hpf007s/binary_sensor/dreo_hpf007s_presence.h"
+#include "components/dreo_hpf007s/fan/dreo_hpf007s_fan.h"
+#include "components/dreo_hpf007s/number/dreo_hpf007s_number.h"
+#include "components/dreo_hpf007s/select/dreo_hpf007s_select.h"
+#include "components/dreo_hpf007s/sensor/dreo_hpf007s_sensor.h"
+#include "components/dreo_hpf007s/switch/dreo_hpf007s_switch.h"
+#include "components/dreo_hpf007s/text_sensor/dreo_hpf007s_zone.h"
 #undef protected
 
 using esphome::advance_millis;
@@ -50,6 +58,16 @@ using esphome::dreo_ceiling_fan::AMBIENT_PRESET_COUNT;
 using esphome::dreo_ceiling_fan::DreoCeilingFan;
 using esphome::dreo_ceiling_fan::DreoCeilingFanFan;
 using esphome::dreo_ceiling_fan::DreoCeilingFanLight;
+using esphome::dreo_hpf007s::Axis;
+using esphome::dreo_hpf007s::ConnectionIndication;
+using esphome::dreo_hpf007s::DreoHpf007s;
+using esphome::dreo_hpf007s::DreoHpf007sAxisSwitch;
+using esphome::dreo_hpf007s::DreoHpf007sFan;
+using esphome::dreo_hpf007s::DreoHpf007sNumber;
+using esphome::dreo_hpf007s::DreoHpf007sPresence;
+using esphome::dreo_hpf007s::DreoHpf007sSelect;
+using esphome::dreo_hpf007s::DreoHpf007sSensor;
+using esphome::dreo_hpf007s::DreoHpf007sZone;
 
 namespace {
 
@@ -2363,6 +2381,603 @@ void test_diagnostic_full_report_request() {
 
 }
 
+// ---------------------------------------------------------------------------
+// DR-HPF007S coordinator fixtures. Values are the stock full report captured
+// after a factory reset, with sanitized presence data.
+
+struct HpfFixture {
+  Dreo dreo;
+  DreoHpf007s coordinator;
+  DreoHpf007sFan fan;
+  DreoHpf007sAxisSwitch horizontal;
+  DreoHpf007sAxisSwitch vertical;
+  DreoHpf007sNumber vertical_target;
+  DreoHpf007sNumber horizontal_target;
+  DreoHpf007sSensor vertical_measured;
+  DreoHpf007sSensor horizontal_measured;
+  DreoHpf007sNumber curve[6];
+  DreoHpf007sSelect vertical_sweep;
+  DreoHpf007sSelect horizontal_sweep;
+  DreoHpf007sSelect gradient;
+  DreoHpf007sPresence presence;
+  DreoHpf007sZone zone;
+
+  HpfFixture()
+      : coordinator(&dreo),
+        fan(&coordinator),
+        horizontal(&coordinator, Axis::HORIZONTAL),
+        vertical(&coordinator, Axis::VERTICAL),
+        vertical_target(&coordinator, Axis::VERTICAL),
+        horizontal_target(&coordinator, Axis::HORIZONTAL),
+        vertical_measured(&coordinator, Axis::VERTICAL),
+        horizontal_measured(&coordinator, Axis::HORIZONTAL),
+        curve{{&coordinator, uint8_t{0}}, {&coordinator, uint8_t{1}}, {&coordinator, uint8_t{2}},
+              {&coordinator, uint8_t{3}}, {&coordinator, uint8_t{4}}, {&coordinator, uint8_t{5}}},
+        vertical_sweep(&coordinator, Axis::VERTICAL),
+        horizontal_sweep(&coordinator, Axis::HORIZONTAL),
+        gradient(&coordinator),
+        presence(&coordinator),
+        zone(&coordinator) {
+    dreo.set_command_datapoint_marker(1);
+    dreo.set_wifi_status_second_byte(1);
+    dreo.set_enum_command_type(DreoDatapointType::INTEGER);
+    dreo.add_transition_datapoint(1);
+    dreo.add_transition_datapoint(5);
+    for (uint8_t id : {uint8_t{12}, uint8_t{13}, uint8_t{19}, uint8_t{25}, uint8_t{26}})
+      dreo.set_integer_command_width(id, 4);
+    dreo.set_integer_command_width(22, 1);
+    auto *coordinator_ptr = &coordinator;
+    dreo.set_command_authorizer([coordinator_ptr](const DreoDatapointCommand &command) {
+      return coordinator_ptr->authorize_command(command);
+    });
+    vertical_sweep.set_degree_mappings({30, 60, 90});
+    horizontal_sweep.set_degree_mappings({30, 60, 90, 120, 150});
+    // The four stock presets, edge/centre/edge as the application shows them.
+    coordinator.add_gradient("Blue-Green-Blue", 0x2EFFA1, 0x002B7B);
+    coordinator.add_gradient("Green-Blue-Green", 0x0000FF, 0x008F78);
+    coordinator.add_gradient("Orange-Yellow-Orange", 0xFFE32E, 0x693500);
+    coordinator.add_gradient("Purple-Magenta-Purple", 0xCB2EFF, 0x27007B);
+    fan.setup();
+    coordinator.setup();
+  }
+
+  static std::vector<uint8_t> int4(uint32_t value) {
+    return {static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16), static_cast<uint8_t>(value >> 8),
+            static_cast<uint8_t>(value)};
+  }
+
+  void report(const std::vector<uint8_t> &body) { dreo.handle_datapoints_(body.data(), body.size()); }
+
+  // The captured post-reset full report, with the power, mode, speed, axes,
+  // presence and zone values parameterized.
+  void full_report(bool power, uint8_t mode = 4, uint8_t speed = 2, uint8_t axes = 0, uint8_t presence_value = 1,
+                   const std::string &zone_value = "C2") {
+    std::vector<uint8_t> body;
+    append(body, boolean_dp(1, power));
+    append(body, enum_dp(2, mode));
+    append(body, enum_dp(4, speed));
+    append(body, enum_dp(5, axes));
+    append(body, string_dp(6, "temp:23333334444446666668888889"));
+    append(body, string_dp(7, "30,45,-30,-45"));
+    append(body, string_dp(8, "0,0"));
+    append(body, boolean_dp(9, true));
+    append(body, boolean_dp(10, true));
+    append(body, integer_dp(11, int4(84)));
+    append(body, integer_dp(12, int4(0)));
+    append(body, integer_dp(13, int4(0)));
+    append(body, boolean_dp(14, false));
+    append(body, enum_dp(15, 0));
+    append(body, boolean_dp(17, false));
+    append(body, enum_dp(18, 2));
+    append(body, integer_dp(19, int4(0)));
+    append(body, boolean_dp(20, false));
+    append(body, boolean_dp(21, false));
+    append(body, integer_dp(22, int4(0)));
+    append(body, enum_dp(23, presence_value));
+    append(body, string_dp(24, zone_value));
+    append(body, integer_dp(25, int4(0x2EFFA1)));
+    append(body, integer_dp(26, int4(0x002B7B)));
+    append(body, boolean_dp(27, false));
+    append(body, boolean_dp(28, false));
+    report(body);
+  }
+
+  std::vector<std::vector<uint8_t>> deliveries() const {
+    std::vector<std::vector<uint8_t>> payloads;
+    for (const auto &command : dreo.command_queue_) {
+      if (command.cmd == DreoCommandType::DATAPOINT_DELIVER)
+        payloads.push_back(command.payload);
+    }
+    return payloads;
+  }
+
+  // Every module-status payload the hub has transmitted or still holds
+  // queued. Transmitted frames are read back from the serialized bytes, so an
+  // acknowledgement timeout that drops a queued command cannot hide it.
+  std::vector<std::vector<uint8_t>> status_frames() const {
+    std::vector<std::vector<uint8_t>> payloads;
+    size_t offset = 0;
+    while (offset + 9 <= dreo.tx_bytes.size()) {
+      const size_t payload_size = (static_cast<size_t>(dreo.tx_bytes[offset + 6]) << 8) | dreo.tx_bytes[offset + 7];
+      if (dreo.tx_bytes[offset + 4] == static_cast<uint8_t>(DreoCommandType::WIFI_STATE))
+        payloads.emplace_back(dreo.tx_bytes.begin() + offset + 8, dreo.tx_bytes.begin() + offset + 8 + payload_size);
+      offset += payload_size + 9;
+    }
+    for (size_t i = 0; i < dreo.command_queue_.size(); i++) {
+      if (i == 0 && dreo.expected_response_.has_value())
+        continue;
+      if (dreo.command_queue_[i].cmd == DreoCommandType::WIFI_STATE)
+        payloads.push_back(dreo.command_queue_[i].payload);
+    }
+    return payloads;
+  }
+
+  void clear_queue() { dreo.command_queue_.clear(); }
+};
+
+std::vector<uint8_t> hpf_string_command(uint8_t id, const std::string &value) {
+  return command_payload(id, 1, DreoDatapointType::STRING, std::vector<uint8_t>(value.begin(), value.end()));
+}
+
+// T13: both axes share dp5; every base value and request yields the exact
+// combined value, through pending targets and rapid interleavings.
+void test_hpf007s_axes() {
+  for (uint8_t base = 0; base <= 3; base++) {
+    for (Axis axis : {Axis::HORIZONTAL, Axis::VERTICAL}) {
+      for (bool state : {false, true}) {
+        HpfFixture f;
+        f.full_report(true, 1, 5, base);
+        f.clear_queue();
+        const uint8_t bit = axis == Axis::HORIZONTAL ? 0x01 : 0x02;
+        const uint8_t expected = state ? (base | bit) : (base & ~bit);
+        require(f.coordinator.control_axis(axis, state), "axis request was refused");
+        const auto sent = f.deliveries();
+        if (expected == base) {
+          require(sent.empty(), "unchanged axis request emitted a frame");
+        } else {
+          require(sent.size() == 1 && sent[0] == command_payload(5, 1, DreoDatapointType::INTEGER, {expected}),
+                  "axis request did not emit the exact combined dp5 value with the integer type byte");
+        }
+      }
+    }
+  }
+
+  {
+    HpfFixture f;
+    f.full_report(true, 1, 5, 0);
+    f.clear_queue();
+    require(f.coordinator.control_axis(Axis::HORIZONTAL, true), "first interleaved axis request refused");
+    require(f.coordinator.control_axis(Axis::VERTICAL, true), "second interleaved axis request refused");
+    auto sent = f.deliveries();
+    require(sent.size() == 2 && sent[1] == command_payload(5, 1, DreoDatapointType::INTEGER, {3}),
+            "second request before any report did not build on the pending target");
+    require(f.horizontal.state == false && f.vertical.state == false,
+            "axis switches published before an MCU report");
+    f.report(enum_dp(5, 3));
+    require(f.horizontal.state && f.vertical.state, "axis switches did not follow the report");
+    require(!f.dreo.is_datapoint_pending(5), "combined report did not clear the pending axes target");
+    f.clear_queue();
+    require(f.coordinator.control_axis(Axis::VERTICAL, false), "post-report axis request refused");
+    sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == command_payload(5, 1, DreoDatapointType::INTEGER, {1}),
+            "post-report request did not start from the reported value");
+    // A report that lands between the two requests is authoritative.
+    f.report(enum_dp(5, 2));
+    require(!f.horizontal.state && f.vertical.state, "interleaved report was not authoritative");
+  }
+  {
+    HpfFixture f;
+    require(!f.coordinator.control_axis(Axis::HORIZONTAL, true), "axis request accepted before dp5 was known");
+  }
+}
+
+void test_report_callback_contract() {
+  Dreo dreo;
+  unsigned callbacks = 0;
+  bool listener_ran = false;
+  dreo.register_listener(1, [&](const DreoDatapoint &) { listener_ran = true; });
+  dreo.add_ignore_mcu_update_on_datapoints(2);
+  dreo.add_on_report_callback([&](const std::vector<uint8_t> &ids) {
+    require(listener_ran, "report callback ran before datapoint listeners");
+    require(ids == std::vector<uint8_t>({1, 2}), "report callback lost ignored datapoint ID");
+    callbacks++;
+  });
+  auto body = boolean_dp(1, true);
+  append(body, enum_dp(2, 4));
+  auto frame = protocol_frame(0x62, DreoCommandType::DATAPOINT_REPORT, body);
+  feed(dreo, protocol_frame(0x61, DreoCommandType::DATAPOINT_REPORT, {}));
+  auto bad = frame;
+  bad.back() ^= 1;
+  feed(dreo, bad);
+  auto malformed = body;
+  malformed.push_back(3);
+  feed(dreo, protocol_frame(0x63, DreoCommandType::DATAPOINT_REPORT, malformed));
+  feed(dreo, std::vector<uint8_t>(frame.begin(), frame.end() - 1));
+  require(callbacks == 0, "empty, malformed, checksum-invalid or incomplete frame called report callback");
+  feed(dreo, {frame.back()});
+  require(callbacks == 1, "complete valid report did not call exactly once");
+}
+
+void test_hpf007s_calibration_omission() {
+  HpfFixture f;
+  const auto position = string_dp(8, "12,23");
+  auto full = boolean_dp(1, true);
+  append(full, enum_dp(2, 4));
+  auto initial = full;
+  append(initial, position);
+  auto send = [&](const std::vector<uint8_t> &body) {
+    feed(f.dreo, protocol_frame(0x70, DreoCommandType::DATAPOINT_REPORT, body));
+  };
+  send(initial);
+  require(f.vertical_measured.has_state() && f.horizontal_measured.has_state(), "position baseline is missing");
+  const float vertical_target = f.vertical_target.state;
+  const float horizontal_target = f.horizontal_target.state;
+  const size_t vertical_publishes = f.vertical_target.publish_count;
+  const size_t horizontal_publishes = f.horizontal_target.publish_count;
+  send(boolean_dp(1, true));
+  send(enum_dp(2, 4));
+  send({});
+  auto malformed = full;
+  malformed.push_back(8);
+  send(malformed);
+  auto bad = protocol_frame(0x71, DreoCommandType::DATAPOINT_REPORT, full);
+  bad.back() ^= 1;
+  feed(f.dreo, bad);
+  require(f.vertical_measured.has_state() && f.horizontal_measured.has_state(),
+          "partial, empty or invalid report cleared measured position");
+  const size_t notifications = esphome::ControllerRegistry::sensor_notify_count;
+  auto split = protocol_frame(0x72, DreoCommandType::DATAPOINT_REPORT, full);
+  feed(f.dreo, std::vector<uint8_t>(split.begin(), split.end() - 1));
+  require(f.vertical_measured.has_state(), "incomplete frame cleared measured position");
+  feed(f.dreo, {split.back()});
+  require(!f.vertical_measured.has_state() && !f.horizontal_measured.has_state(),
+          "eligible omission did not invalidate measured position");
+  require(!f.coordinator.position_measured_[0].has_value() && !f.coordinator.position_measured_[1].has_value(),
+          "eligible omission retained coordinator measurements");
+  require(esphome::ControllerRegistry::sensor_notify_count == notifications + 2 &&
+              esphome::ControllerRegistry::sensor_missing_state, "missing-state notification did not reach controllers");
+  require(f.vertical_target.state == vertical_target && f.horizontal_target.state == horizontal_target &&
+              f.vertical_target.publish_count == vertical_publishes &&
+              f.horizontal_target.publish_count == horizontal_publishes,
+          "calibration changed target controls");
+  send(position);
+  require(f.vertical_measured.has_state() && f.horizontal_measured.has_state() &&
+              f.vertical_measured.state == 12 && f.horizontal_measured.state == 23,
+          "unchanged position report did not restore measurements");
+}
+
+// T14: structured strings reject malformed input, batches are byte-exact, and
+// a position target survives the echo/old/final report sequence.
+void test_hpf007s_structured_strings() {
+  {
+    HpfFixture f;
+    f.full_report(true, 6, 5);
+    require(f.curve[0].state == 2.0f && f.curve[1].state == 3.0f && f.curve[2].state == 4.0f &&
+                f.curve[3].state == 6.0f && f.curve[4].state == 8.0f && f.curve[5].state == 9.0f,
+            "curve blocks were not decoded from the factory curve");
+    f.clear_queue();
+    require(f.coordinator.control_curve_block(4, 8), "curve block edit refused");
+    require(f.deliveries().empty(), "unchanged curve block emitted a frame");
+    const size_t publishes = f.curve[0].publish_count;
+    for (const std::string &bad : {"temp:2333333444444666666888888", "temp:233333344444466666688888890",
+                                   "temp:2333333444444666666888880", "tmp:23333334444446666668888889", ""}) {
+      f.report(string_dp(6, bad));
+    }
+    require(f.curve[0].publish_count == publishes && f.curve[0].state == 2.0f,
+            "malformed curve report changed the retained curve");
+    require(f.coordinator.control_curve_block(3, 2), "curve block edit refused");
+    auto sent = f.deliveries();
+    auto expected = command_payload(2, 1, DreoDatapointType::INTEGER, {6});
+    append(expected, hpf_string_command(6, "temp:23333334444442222228888889"));
+    require(sent.size() == 1 && sent[0] == expected,
+            "curve edit did not emit the exact mode-plus-curve batch");
+    require(!f.coordinator.control_curve_block(3, 0) && !f.coordinator.control_curve_block(6, 5),
+            "invalid curve request accepted");
+  }
+  {
+    HpfFixture f;
+    require(!f.coordinator.control_curve_block(0, 3), "curve edit accepted before the MCU reported a curve");
+  }
+  {
+    HpfFixture f;
+    f.full_report(true, 1, 5, 3);
+    require(f.horizontal_sweep.last_state == 2 && f.vertical_sweep.last_state == 0,
+            "sweep selects did not decode 30,45,-30,-45 as horizontal 90 and vertical 30");
+    for (const std::string &bad : {"30,45,-30", "30,45,-30,-45,7", "30,x,-30,-45", "30,,-30,-45", ""})
+      f.report(string_dp(7, bad));
+    require(f.horizontal_sweep.last_state == 2, "malformed sweep report changed the retained setting");
+    f.clear_queue();
+    require(f.coordinator.control_sweep(Axis::VERTICAL, 90), "vertical sweep refused");
+    auto sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == hpf_string_command(7, "90,45,-30,-45"),
+            "vertical sweep did not compose the captured 90,45,-30,-45 form");
+    require(f.vertical_sweep.last_state == 2, "vertical sweep setting was not retained");
+    f.clear_queue();
+    require(f.coordinator.control_sweep(Axis::HORIZONTAL, 150), "horizontal sweep refused");
+    sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == hpf_string_command(7, "90,75,-30,-75"),
+            "horizontal sweep did not compose symmetric halves with the retained vertical setting");
+    // The idle axis reverts its field; the retained setting must not follow.
+    f.report(enum_dp(5, 2));
+    f.report(string_dp(7, "90,45,-30,-45"));
+    require(f.horizontal_sweep.last_state == 4, "idle horizontal report overwrote the requested sweep");
+    require(f.vertical_sweep.last_state == 2, "active vertical report was not adopted");
+    f.report(enum_dp(5, 3));
+    f.report(string_dp(7, "60,30,-30,-30"));
+    require(f.horizontal_sweep.last_state == 1 && f.vertical_sweep.last_state == 1,
+            "active axes did not adopt the reported sweep");
+    require(!f.coordinator.control_sweep(Axis::HORIZONTAL, 0), "zero sweep accepted");
+  }
+  {
+    HpfFixture f;
+    f.full_report(true, 1, 5);
+    for (const std::string &bad : {"0,0,0", "x,0", "0", "--5,0"})
+      f.report(string_dp(8, bad));
+    require(f.horizontal_measured.publish_count == 1 && f.vertical_measured.publish_count == 1,
+            "malformed position report published a measurement");
+    f.clear_queue();
+    set_millis(100000);
+    require(f.coordinator.control_position(Axis::HORIZONTAL, -75), "position request refused");
+    auto sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == hpf_string_command(8, ",-75"),
+            "horizontal target did not leave the vertical field empty");
+    require(f.horizontal_target.state == -75.0f, "target entity did not show the request");
+    f.report(string_dp(8, "0,-75"));  // immediate echo
+    require(f.horizontal_measured.state == -75.0f && f.horizontal_target.state == -75.0f,
+            "echo did not publish as measured while keeping the target");
+    advance_millis(40);
+    f.report(string_dp(8, "0,0"));  // old position while the head travels
+    require(f.horizontal_measured.state == 0.0f, "old-position report was not measured");
+    require(f.horizontal_target.state == -75.0f, "old-position report overwrote the target");
+    advance_millis(12000);
+    f.report(string_dp(8, "0,-75"));  // arrival
+    require(f.horizontal_measured.state == -75.0f && f.horizontal_target.state == -75.0f,
+            "arrival did not settle target and measurement together");
+    f.report(string_dp(8, "0,20"));  // a later panel move
+    require(f.horizontal_target.state == 20.0f && f.vertical_target.state == 0.0f,
+            "settled target did not follow a later measured move");
+    require(!f.coordinator.control_position(Axis::HORIZONTAL, 76) &&
+                !f.coordinator.control_position(Axis::VERTICAL, -31),
+            "out-of-range position accepted");
+    f.clear_queue();
+    require(f.coordinator.control_position(Axis::VERTICAL, 45), "vertical position refused");
+    sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == hpf_string_command(8, "45,"), "vertical target form was not exact");
+    f.report(string_dp(8, "45,20"));
+    advance_millis(31000);
+    f.report(string_dp(8, "10,20"));
+    require(f.vertical_target.state == 10.0f, "travel timeout did not release an unconfirmed target");
+    f.clear_queue();
+    require(f.coordinator.calibrate(true, true) && f.coordinator.calibrate(true, false) &&
+                f.coordinator.calibrate(false, true) && !f.coordinator.calibrate(false, false),
+            "calibration requests were not accepted as expected");
+    sent = f.deliveries();
+    require(sent.size() == 3 && sent[0] == hpf_string_command(8, ",") && sent[1] == hpf_string_command(8, "0,") &&
+                sent[2] == hpf_string_command(8, ",0"),
+            "calibration frames did not match the captured forms");
+  }
+  {
+    HpfFixture f;
+    f.full_report(true, 1, 5);
+    require(f.gradient.last_state == 0, "factory colours did not select the first gradient");
+    f.clear_queue();
+    require(f.coordinator.control_gradient(1), "gradient request refused");
+    auto sent = f.deliveries();
+    auto expected = command_payload(25, 1, DreoDatapointType::INTEGER, {0x00, 0x00, 0x00, 0xFF});
+    append(expected, command_payload(26, 1, DreoDatapointType::INTEGER, {0x00, 0x00, 0x8F, 0x78}));
+    require(sent.size() == 1 && sent[0] == expected, "gradient batch did not match the captured frame");
+    require(!f.coordinator.control_gradient(4), "unknown gradient accepted");
+    f.report(integer_dp(25, HpfFixture::int4(0xCB2EFF)));
+    require(f.gradient.last_state == 0, "half-updated colours changed the selected gradient");
+    f.report(integer_dp(26, HpfFixture::int4(0x27007B)));
+    require(f.gradient.last_state == 3, "reported colour pair did not select its gradient");
+  }
+}
+
+// T15: presence and zone are unavailable while the fan is off, through the
+// same controller-visible route the API consumes.
+void test_hpf007s_presence_availability() {
+  HpfFixture f;
+  esphome::BinarySensorRegistryStub::notify_count = 0;
+  esphome::ControllerRegistry::notify_count = 0;
+  f.full_report(true, 1, 5, 0, 1, "A6");
+  require(f.presence.has_state() && f.presence.state && f.zone.has_state() && f.zone.state == "A6",
+          "presence and zone were not published while on");
+  const size_t binary_notifies = esphome::BinarySensorRegistryStub::notify_count;
+  const size_t text_notifies = esphome::ControllerRegistry::notify_count;
+
+  f.report(boolean_dp(1, false));
+  require(!f.presence.has_state() && !f.zone.has_state(), "power-off did not clear presence and zone");
+  require(esphome::BinarySensorRegistryStub::notify_count == binary_notifies + 1 &&
+              esphome::BinarySensorRegistryStub::last_missing_state,
+          "presence invalidation did not notify the controller registry with a missing state");
+  require(esphome::ControllerRegistry::notify_count == text_notifies + 1 && esphome::ControllerRegistry::last_missing_state,
+          "zone invalidation did not notify the controller registry with a missing state");
+
+  // Stale values in a full report while off, and heartbeat-only time, cannot
+  // revive them.
+  f.full_report(false, 1, 5, 0, 1, "A6");
+  advance_millis(230000);
+  require(!f.presence.has_state() && !f.zone.has_state(), "stale presence revived while off");
+
+  // Power on alone restores nothing; the next report while on does.
+  f.report(boolean_dp(1, true));
+  require(!f.presence.has_state() && !f.zone.has_state(), "power-on republished stale presence");
+  f.report(enum_dp(23, 0));
+  f.report(string_dp(24, "0"));
+  require(f.presence.has_state() && !f.presence.state && f.zone.has_state() && f.zone.state == "0",
+          "fresh reports while on did not restore availability");
+}
+
+// T16/T17: the fan follows reports, queues settings until power is confirmed,
+// emits the captured mode and speed forms, and the authorizer allows only
+// power, the auto-on timer and the child lock while confirmed off.
+void test_hpf007s_fan_and_authorizer() {
+  {
+    HpfFixture f;
+    require(!f.dreo.force_set_boolean_datapoint_value(9, true), "unknown power granted a subordinate write");
+    require(f.dreo.force_set_boolean_datapoint_value(1, true), "power write refused with unknown power");
+    f.clear_queue();
+    require(!f.dreo.force_set_boolean_datapoint_value(9, true), "pending power granted a subordinate write");
+    f.report(boolean_dp(1, false));
+    f.dreo.pending_transitions_.clear();
+  }
+  {
+    HpfFixture f;
+    f.full_report(false);
+    f.clear_queue();
+    require(f.dreo.force_set_integer_datapoint_value(12, 719) && f.dreo.force_set_boolean_datapoint_value(17, true) &&
+                f.dreo.force_set_boolean_datapoint_value(1, true),
+            "auto-on timer, child lock or power was refused while off");
+    auto sent = f.deliveries();
+    require(sent.size() == 3 && sent[0] == command_payload(12, 1, DreoDatapointType::INTEGER, {0, 0, 2, 0xCF}),
+            "auto-on timer did not use the four-byte width");
+    f.clear_queue();
+    for (uint8_t id : {uint8_t{9}, uint8_t{10}, uint8_t{18}, uint8_t{21}, uint8_t{22}, uint8_t{27}, uint8_t{28}})
+      require(!f.dreo.force_set_boolean_datapoint_value(id, true) && !f.dreo.force_set_enum_datapoint_value(id, 1),
+              "subordinate write granted while off or pending");
+    require(!f.dreo.force_set_integer_datapoint_value(13, 5), "auto-off timer granted while off");
+    require(f.deliveries().empty(), "refused writes reached the queue");
+  }
+  {
+    HpfFixture f;
+    f.full_report(true, 1, 5);
+    f.clear_queue();
+    require(f.dreo.force_set_boolean_datapoint_value(9, false) && f.dreo.force_set_integer_datapoint_value(13, 192) &&
+                f.dreo.force_set_integer_datapoint_value(19, static_cast<uint32_t>(-10)) &&
+                f.dreo.force_set_integer_datapoint_value(22, 30) && f.dreo.force_set_enum_datapoint_value(18, 1) &&
+                f.dreo.force_set_boolean_datapoint_value(28, true),
+            "mapped control refused while on");
+    auto sent = f.deliveries();
+    require(sent.size() == 6, "mapped controls did not each emit one frame");
+    require(sent[1] == command_payload(13, 1, DreoDatapointType::INTEGER, {0, 0, 0, 0xC0}),
+            "auto-off timer frame did not match the capture");
+    require(sent[2] == command_payload(19, 1, DreoDatapointType::INTEGER, {0xFF, 0xFF, 0xFF, 0xF6}),
+            "signed calibration frame did not match the capture");
+    require(sent[3] == command_payload(22, 1, DreoDatapointType::INTEGER, {0x1E}),
+            "adaptive angle did not use the captured one-byte width");
+    require(sent[4] == command_payload(18, 1, DreoDatapointType::INTEGER, {0x01}),
+            "display mode did not use the captured integer type byte");
+    f.report(enum_dp(2, 5));
+    require(!f.dreo.force_set_boolean_datapoint_value(28, true), "Auto Speed granted outside Normal mode");
+  }
+  {
+    HpfFixture f;
+    f.full_report(true, 4, 2);
+    require(f.fan.state && f.fan.speed == 2 && f.fan.get_preset_mode() == "Auto", "fan did not follow the report");
+    f.report(enum_dp(4, 7));
+    require(f.fan.speed == 7 && f.deliveries().empty(), "autonomous speed change was not followed or was overwritten");
+    f.clear_queue();
+    f.fan.make_call().set_speed(5).perform();
+    auto sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == command_payload(4, 1, DreoDatapointType::INTEGER, {5}),
+            "speed request did not emit the one-byte integer form");
+    f.clear_queue();
+    f.fan.make_call().set_preset_mode("Turbo").perform();
+    sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == command_payload(2, 1, DreoDatapointType::INTEGER, {5}),
+            "Turbo request did not match the captured mode frame");
+    f.clear_queue();
+    f.fan.make_call().set_preset_mode("Custom").perform();
+    sent = f.deliveries();
+    auto expected = command_payload(2, 1, DreoDatapointType::INTEGER, {6});
+    append(expected, hpf_string_command(6, "temp:23333334444446666668888889"));
+    require(sent.size() == 1 && sent[0] == expected, "Custom request did not batch the current curve");
+    f.clear_queue();
+    f.fan.make_call().set_speed(0).perform();
+    f.fan.make_call().set_speed(10).perform();
+    require(f.deliveries().empty(), "out-of-range speed reached the queue");
+    f.fan.make_call().set_state(false).perform();
+    sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == command_payload(1, 1, DreoDatapointType::BOOLEAN, {0}),
+            "fan off did not write only dp1");
+    require(f.fan.state, "fan published off before the MCU report");
+    f.report(boolean_dp(1, false));
+    require(!f.fan.state, "fan did not follow the off report");
+  }
+  {
+    HpfFixture f;
+    f.full_report(false);
+    f.clear_queue();
+    f.fan.make_call().set_state(true).set_speed(6).set_preset_mode("Natural").perform();
+    auto sent = f.deliveries();
+    require(sent.size() == 1 && sent[0] == command_payload(1, 1, DreoDatapointType::BOOLEAN, {1}),
+            "power-on with settings did not write only dp1 first");
+    f.clear_queue();
+    f.fan.make_call().set_state(true).perform();
+    require(f.deliveries().empty(), "repeated power-on re-sent dp1 while pending");
+    f.report(boolean_dp(1, true));
+    sent = f.deliveries();
+    require(sent.size() == 2 && sent[0] == command_payload(2, 1, DreoDatapointType::INTEGER, {2}) &&
+                sent[1] == command_payload(4, 1, DreoDatapointType::INTEGER, {6}),
+            "queued mode and speed were not flushed after confirmed power");
+  }
+}
+
+// T26: the connection indicator sends 03 01, 00 01 and 05 01 once per derived
+// state, after initialization, with a five-second Wi-Fi-loss debounce.
+void test_hpf007s_connection_indication() {
+  set_millis(1000);
+  HpfFixture f;
+  f.coordinator.set_wifi_connected(true);
+  f.coordinator.set_state_subscriber_connected(false);
+  f.coordinator.loop();
+  require(f.status_frames().empty(), "indicator frame sent before hub initialization");
+  f.dreo.init_state_ = esphome::dreo::DreoInitState::INIT_DONE;
+  f.dreo.initialized_callback_.call();
+  auto frames = f.status_frames();
+  require(frames.size() == 1 && frames[0] == std::vector<uint8_t>({0x00, 0x01}),
+          "Wi-Fi without a state client did not send exactly one 00 01");
+  f.coordinator.loop();
+  f.coordinator.set_wifi_connected(true);
+  require(f.status_frames().size() == 1, "unchanged state repeated the indicator frame");
+  f.coordinator.set_state_subscriber_connected(true);
+  frames = f.status_frames();
+  require(frames.size() == 2 && frames[1] == std::vector<uint8_t>({0x05, 0x01}),
+          "state subscriber did not send exactly one 05 01");
+  f.coordinator.set_state_subscriber_connected(true);
+  require(f.status_frames().size() == 2, "repeated subscriber state repeated the frame");
+  f.coordinator.set_wifi_connected(false);
+  advance_millis(4999);
+  f.coordinator.loop();
+  require(f.status_frames().size() == 2, "Wi-Fi loss flashed before the five-second debounce");
+  advance_millis(1);
+  f.coordinator.loop();
+  frames = f.status_frames();
+  require(frames.size() == 3 && frames[2] == std::vector<uint8_t>({0x03, 0x01}),
+          "Wi-Fi loss did not flash exactly once after five seconds");
+  f.coordinator.loop();
+  require(f.status_frames().size() == 3, "flashing state repeated the frame");
+  f.coordinator.set_wifi_connected(true);
+  frames = f.status_frames();
+  require(frames.size() == 4 && frames[3] == std::vector<uint8_t>({0x05, 0x01}),
+          "Wi-Fi return with a subscriber did not send 05 01");
+  // A brief loss shorter than the debounce sends nothing.
+  f.coordinator.set_wifi_connected(false);
+  advance_millis(2000);
+  f.coordinator.loop();
+  f.coordinator.set_wifi_connected(true);
+  advance_millis(4000);
+  f.coordinator.loop();
+  require(f.status_frames().size() == 4, "brief Wi-Fi loss produced a frame");
+  // A session restart repeats the current state once after re-initialization.
+  f.dreo.module_reset_request_callback_.call();
+  f.dreo.initialized_callback_.call();
+  frames = f.status_frames();
+  require(frames.size() == 5 && frames[4] == std::vector<uint8_t>({0x05, 0x01}),
+          "re-initialization did not repeat the current state once");
+}
+
+void test_hpf007s_enum_command_type_default() {
+  Dreo dreo;
+  auto body = enum_dp(18, 2);
+  dreo.handle_datapoints_(body.data(), body.size());
+  require(dreo.force_set_enum_datapoint_value(18, 1), "enum write refused");
+  require(dreo.command_queue_.size() == 1 &&
+              dreo.command_queue_[0].payload == command_payload(18, 0, DreoDatapointType::ENUM, {1}),
+          "default enum command type byte changed");
+}
+
 void run_fixed() {
   test_stream_retransmission_recovery();
   test_report_acknowledgement();
@@ -2388,6 +3003,14 @@ void run_fixed() {
   test_pending_transition_reversal_direct();
   test_atomic_datapoint_batches();
   test_pending_transition_reversal_hcf_control();
+  test_hpf007s_enum_command_type_default();
+  test_hpf007s_axes();
+  test_report_callback_contract();
+  test_hpf007s_calibration_omission();
+  test_hpf007s_structured_strings();
+  test_hpf007s_presence_availability();
+  test_hpf007s_fan_and_authorizer();
+  test_hpf007s_connection_indication();
   std::cout << "PASS: actual C++ sources satisfy parser, light, text, lock, guard, and legacy regressions\n";
 }
 #endif

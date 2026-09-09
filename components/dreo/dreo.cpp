@@ -56,6 +56,7 @@ void Dreo::dump_config() {
   ESP_LOGCONFIG(TAG, "  Command spacing: %" PRIu32 " ms", this->command_spacing_);
   ESP_LOGCONFIG(TAG, "  Wi-Fi status second byte: %u", this->wifi_status_second_byte_);
   ESP_LOGCONFIG(TAG, "  Acknowledge datapoint reports: %s", YESNO(this->acknowledge_reports_));
+  ESP_LOGCONFIG(TAG, "  Enum command type byte: 0x%02X", this->enum_command_type_);
   if (this->init_state_ != DreoInitState::INIT_DONE) {
     if (this->init_failed_) {
       ESP_LOGCONFIG(TAG, "  Initialization failed. Current init_state: %u", static_cast<uint8_t>(this->init_state_));
@@ -257,7 +258,10 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
     }
     case DreoCommandType::DATAPOINT_DELIVER:
       break;
-    case DreoCommandType::DATAPOINT_REPORT:
+    case DreoCommandType::DATAPOINT_REPORT: {
+      std::vector<uint8_t> report_ids;
+      if (len != 0)
+        report_ids.reserve(32);
       if (this->init_state_ == DreoInitState::INIT_DATAPOINT) {
         this->init_state_ = DreoInitState::INIT_DONE;
         this->set_timeout("datapoint_dump", 1000, [this] { this->dump_config(); });
@@ -265,7 +269,10 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
       }
       this->handle_datapoints_(
           buffer, len,
-          completed_expected_response && completed_command.reconciliation_route == DreoReconciliationRoute::TRANSITION);
+          completed_expected_response && completed_command.reconciliation_route == DreoReconciliationRoute::TRANSITION,
+          &report_ids);
+      if (len != 0)
+        this->report_callback_.call(report_ids);
       if (this->acknowledge_reports_ && this->report_body_is_valid_(buffer, len))
         this->send_response_(DreoCommandType::DATAPOINT_REPORT, version, sequence);
       if (!this->has_pending_transitions_()) {
@@ -284,6 +291,7 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
       }
 
       break;
+    }
     case DreoCommandType::DATAPOINT_QUERY:
       break;
     case DreoCommandType::BUTTON_EVENT:
@@ -313,7 +321,8 @@ void Dreo::handle_command_(uint8_t command, uint8_t version, uint8_t sequence, c
   }
 }
 
-void Dreo::handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report) {
+void Dreo::handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report,
+                            std::vector<uint8_t> *report_ids) {
   while (len >= 5) {
     DreoDatapoint datapoint{};
     datapoint.id = buffer[0];
@@ -387,6 +396,8 @@ void Dreo::handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritat
     if (!supported)
       continue;
 
+    if (report_ids != nullptr)
+      report_ids->push_back(datapoint.id);
     this->clear_confirmed_transition_(datapoint, authoritative_transition_report);
 
     // drop update if datapoint is in ignore_mcu_datapoint_update list
@@ -979,7 +990,8 @@ bool Dreo::send_datapoint_commands_(const std::vector<DreoPreparedDatapointComma
   for (const auto &item : commands) {
     buffer.push_back(item.command.datapoint_id);
     buffer.push_back(this->command_datapoint_marker_);
-    buffer.push_back(static_cast<uint8_t>(item.command.type));
+    buffer.push_back(item.command.type == DreoDatapointType::ENUM ? this->enum_command_type_
+                                                                   : static_cast<uint8_t>(item.command.type));
     buffer.push_back(item.data.size() >> 8);
     buffer.push_back(item.data.size());
     buffer.insert(buffer.end(), item.data.begin(), item.data.end());

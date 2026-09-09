@@ -1,0 +1,280 @@
+# Hardware-free DR-HPF007S product map. The consuming wrapper supplies the
+# UART, board and network, and feeds the coordinator's Wi-Fi indicator inputs.
+#
+# Compile-tested only: this package has not run on a fan. Every datapoint
+# meaning below comes from stock-firmware captures of the panel, remote and
+# application; the MCU's acceptance of these commands is not yet observed.
+dreo:
+  id: dreo_hub
+  uart_id: mcu_uart
+  # Captured stock commands carry marker 1 and, for the enum datapoints the
+  # MCU reports as type 0x04, the integer type byte 0x02.
+  command_datapoint_marker: 1
+  enum_command_type: int
+  # The module in the assembled fan reports 01 as the second status byte, and
+  # the MCU acknowledges every valid report with an empty same-sequence reply.
+  wifi_status_second_byte: 1
+  acknowledge_reports: true
+  transition_datapoints: [1, 5]
+  # Both timers, the signed calibration and both light colours are written as
+  # four bytes even for small values; the adaptive angle as one.
+  integer_command_widths:
+    12: 4
+    13: 4
+    19: 4
+    22: 1
+    25: 4
+    26: 4
+  allow_sub_entity_control_while_off: false
+  command_authorizer: return id(hpf007s_coordinator).authorize_command(command);
+
+dreo_hpf007s:
+  id: hpf007s_coordinator
+  dreo_id: dreo_hub
+
+fan:
+  - platform: dreo_hpf007s
+    id: hpf007s_fan
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Fan
+    restore_mode: NO_RESTORE
+
+switch:
+  - platform: dreo_hpf007s
+    id: hpf007s_horizontal_oscillation
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Horizontal Oscillation
+    axis: horizontal
+  - platform: dreo_hpf007s
+    id: hpf007s_vertical_oscillation
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Vertical Oscillation
+    axis: vertical
+  - platform: dreo
+    id: hpf007s_mute
+    name: Mute
+    switch_datapoint: 9
+    entity_category: config
+  - platform: dreo
+    id: hpf007s_restore_oscillation
+    name: Restore Oscillation After Power Off
+    switch_datapoint: 10
+    entity_category: config
+  - platform: dreo
+    id: hpf007s_presence_following
+    name: Presence Following
+    switch_datapoint: 21
+  - platform: dreo
+    id: hpf007s_find_me
+    name: Find Me
+    switch_datapoint: 27
+  - platform: dreo
+    id: hpf007s_auto_speed
+    name: Auto Speed
+    switch_datapoint: 28
+
+select:
+  - platform: dreo_hpf007s
+    id: hpf007s_vertical_sweep
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Vertical Sweep
+    axis: vertical
+    options:
+      30: "30°"
+      60: "60°"
+      90: "90°"
+  - platform: dreo_hpf007s
+    id: hpf007s_horizontal_sweep
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Horizontal Sweep
+    axis: horizontal
+    options:
+      30: "30°"
+      60: "60°"
+      90: "90°"
+      120: "120°"
+      150: "150°"
+  - platform: dreo_hpf007s
+    id: hpf007s_sensor_light_gradient
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Sensor Light Gradient
+    entity_category: config
+    # The four stock presets, named edge/centre/edge as the application shows
+    # them; each writes both colours in one frame.
+    sensor_light_gradients:
+      - name: Blue-Green-Blue
+        centre: 0x2EFFA1
+        edge: 0x002B7B
+      - name: Green-Blue-Green
+        centre: 0x0000FF
+        edge: 0x008F78
+      - name: Orange-Yellow-Orange
+        centre: 0xFFE32E
+        edge: 0x693500
+      - name: Purple-Magenta-Purple
+        centre: 0xCB2EFF
+        edge: 0x27007B
+  - platform: dreo
+    id: hpf007s_display_mode
+    name: Display
+    enum_datapoint: 18
+    entity_category: config
+    options:
+      0: "Off"
+      1: "On"
+      2: Auto
+  - platform: dreo
+    id: hpf007s_adaptive_oscillation
+    name: Adaptive Oscillation
+    int_datapoint: 22
+    options:
+      0: "Off"
+      30: "30°"
+      60: "60°"
+      90: "90°"
+
+number:
+  - platform: dreo_hpf007s
+    id: hpf007s_vertical_position
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Vertical Position
+    axis: vertical
+    unit_of_measurement: "°"
+    mode: slider
+  - platform: dreo_hpf007s
+    id: hpf007s_horizontal_position
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Horizontal Position
+    axis: horizontal
+    unit_of_measurement: "°"
+    mode: slider
+  # Custom curve blocks. Saving a block sends the whole curve together with
+  # Custom mode in one frame, exactly as the stock application does, so
+  # editing a block switches the fan to Custom mode.
+  - platform: dreo_hpf007s
+    id: hpf007s_curve_block_0
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Custom Speed at or below 67°F
+    curve_block: 0
+    entity_category: config
+  - platform: dreo_hpf007s
+    id: hpf007s_curve_block_1
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Custom Speed 68-73°F
+    curve_block: 1
+    entity_category: config
+  - platform: dreo_hpf007s
+    id: hpf007s_curve_block_2
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Custom Speed 74-79°F
+    curve_block: 2
+    entity_category: config
+  - platform: dreo_hpf007s
+    id: hpf007s_curve_block_3
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Custom Speed 80-85°F
+    curve_block: 3
+    entity_category: config
+  - platform: dreo_hpf007s
+    id: hpf007s_curve_block_4
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Custom Speed 86-91°F
+    curve_block: 4
+    entity_category: config
+  - platform: dreo_hpf007s
+    id: hpf007s_curve_block_5
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Custom Speed at or above 92°F
+    curve_block: 5
+    entity_category: config
+  - platform: dreo
+    id: hpf007s_auto_on_timer
+    name: Auto On Timer
+    number_datapoint: 12
+    min_value: 0
+    max_value: 719
+    step: 1
+    device_class: duration
+    unit_of_measurement: min
+  - platform: dreo
+    id: hpf007s_auto_off_timer
+    name: Auto Off Timer
+    number_datapoint: 13
+    min_value: 0
+    max_value: 719
+    step: 1
+    device_class: duration
+    unit_of_measurement: min
+  - platform: dreo
+    id: hpf007s_temperature_calibration
+    name: Temperature Calibration
+    number_datapoint: 19
+    min_value: -10
+    max_value: 10
+    step: 1
+    device_class: temperature
+    unit_of_measurement: "°F"
+    entity_category: config
+
+button:
+  - platform: template
+    id: hpf007s_calibrate_all
+    name: Calibrate Head
+    entity_category: config
+    on_press:
+      - lambda: id(hpf007s_coordinator).calibrate(true, true);
+  - platform: template
+    id: hpf007s_calibrate_vertical
+    name: Calibrate Vertical
+    entity_category: config
+    on_press:
+      - lambda: id(hpf007s_coordinator).calibrate(true, false);
+  - platform: template
+    id: hpf007s_calibrate_horizontal
+    name: Calibrate Horizontal
+    entity_category: config
+    on_press:
+      - lambda: id(hpf007s_coordinator).calibrate(false, true);
+
+lock:
+  - platform: dreo
+    id: hpf007s_child_lock
+    name: Child Lock
+    lock_datapoint: 17
+
+sensor:
+  - platform: dreo_hpf007s
+    id: hpf007s_vertical_position_measured
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Vertical Position Measured
+    axis: vertical
+  - platform: dreo_hpf007s
+    id: hpf007s_horizontal_position_measured
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Horizontal Position Measured
+    axis: horizontal
+  - platform: dreo
+    id: hpf007s_temperature
+    name: Ambient Temperature
+    sensor_datapoint: 11
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: "°F"
+
+binary_sensor:
+  - platform: dreo_hpf007s
+    id: hpf007s_presence
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Presence
+  - platform: dreo
+    id: hpf007s_schedule_present
+    name: Stock Schedule Present
+    sensor_datapoint: 14
+    entity_category: diagnostic
+    disabled_by_default: true
+
+text_sensor:
+  - platform: dreo_hpf007s
+    id: hpf007s_presence_zone
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Presence Zone

@@ -1,0 +1,13 @@
+packages:
+  base: !include hpf007s-package-valid.yaml
+
+select:
+  - platform: dreo_hpf007s
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Bad Gradient
+    options:
+      1: One
+    sensor_light_gradients:
+      - name: Only
+        centre: 0x000000
+        edge: 0xFFFFFF

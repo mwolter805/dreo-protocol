@@ -37,7 +37,7 @@ else
   fi
 fi
 
-cxxflags="-std=c++17 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -DUSE_TEXT_SENSOR -DUSE_CONTROLLER_REGISTRY"
+cxxflags="-std=c++17 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -DUSE_SENSOR -DUSE_TEXT_SENSOR -DUSE_CONTROLLER_REGISTRY"
 if [ "$mode" = fixed ]; then
   cxxflags="$cxxflags -DDREO_FIXED_TESTS"
 fi
@@ -59,6 +59,14 @@ c++ $cxxflags \
   "$root/components/dreo_ceiling_fan/dreo_ceiling_fan.cpp" \
   "$root/components/dreo_ceiling_fan/fan/dreo_ceiling_fan_fan.cpp" \
   "$root/components/dreo_ceiling_fan/light/dreo_ceiling_fan_light.cpp" \
+  "$root/components/dreo_hpf007s/dreo_hpf007s.cpp" \
+  "$root/components/dreo_hpf007s/fan/dreo_hpf007s_fan.cpp" \
+  "$root/components/dreo_hpf007s/switch/dreo_hpf007s_switch.cpp" \
+  "$root/components/dreo_hpf007s/number/dreo_hpf007s_number.cpp" \
+  "$root/components/dreo_hpf007s/sensor/dreo_hpf007s_sensor.cpp" \
+  "$root/components/dreo_hpf007s/select/dreo_hpf007s_select.cpp" \
+  "$root/components/dreo_hpf007s/binary_sensor/dreo_hpf007s_presence.cpp" \
+  "$root/components/dreo_hpf007s/text_sensor/dreo_hpf007s_zone.cpp" \
   "$root/tests/host/dreo_host_test.cpp" \
   -o "$build/dreo_host_test"
 
@@ -68,6 +76,7 @@ cd "$root"
 if [ "$mode" = fixed ]; then
   PYTHONDONTWRITEBYTECODE=1 "$python" tests/host/test_decode.py --fixed
   PYTHONDONTWRITEBYTECODE=1 "$python" tests/host/test_phase1_contract.py
+  PYTHONDONTWRITEBYTECODE=1 "$python" tests/host/test_hpf007s_contract.py
 else
   PYTHONDONTWRITEBYTECODE=1 "$python" tests/host/test_decode.py
 fi

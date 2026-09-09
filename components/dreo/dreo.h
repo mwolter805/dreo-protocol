@@ -22,6 +22,12 @@ static constexpr uint32_t DEFAULT_COMMAND_SPACING_MS = 10;
 // through the hub's `wifi_status_second_byte` option.
 static constexpr uint8_t DEFAULT_WIFI_STATUS_SECOND_BYTE = 0x00;
 
+// Type byte written for enum datapoint commands when a configuration does not
+// choose its own. Some products report enums as type 0x04 but expect commands
+// for the same datapoints to carry the integer type byte 0x02; they set it
+// through the hub's `enum_command_type` option.
+static constexpr uint8_t DEFAULT_ENUM_COMMAND_TYPE = 0x04;
+
 enum class DreoDatapointType : uint8_t {
   // RAW = 0x00,      // variable length
   BOOLEAN = 0x01,  // 1 byte (0/1)
@@ -149,6 +155,13 @@ class Dreo final : public Component, public uart::UARTDevice {
   void set_wifi_status_second_byte(uint8_t value) { this->wifi_status_second_byte_ = value; }
   uint8_t get_wifi_status_second_byte() const { return this->wifi_status_second_byte_; }
   void set_acknowledge_reports(bool acknowledge) { this->acknowledge_reports_ = acknowledge; }
+  void set_enum_command_type(DreoDatapointType type) { this->enum_command_type_ = static_cast<uint8_t>(type); }
+  uint8_t get_enum_command_type() const { return this->enum_command_type_; }
+  // Called synchronously after all datapoint listeners for a valid nonempty report.
+  // The ID list describes this report, including ignored datapoints; do not retain its reference.
+  template<typename F> void add_on_report_callback(F &&callback) {
+    this->report_callback_.add(std::forward<F>(callback));
+  }
   template<typename F> void add_on_initialized_callback(F &&callback) {
     this->initialized_callback_.add(std::forward<F>(callback));
   }
@@ -164,7 +177,8 @@ class Dreo final : public Component, public uart::UARTDevice {
 
  protected:
   void handle_char_(uint8_t c);
-  void handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report = false);
+  void handle_datapoints_(const uint8_t *buffer, size_t len, bool authoritative_transition_report = false,
+                          std::vector<uint8_t> *report_ids = nullptr);
   optional<DreoDatapoint> get_datapoint_(uint8_t datapoint_id);
   optional<uint8_t> integer_command_width_(uint8_t datapoint_id) const;
   void process_rx_buffer_();
@@ -212,6 +226,7 @@ class Dreo final : public Component, public uart::UARTDevice {
   std::vector<uint8_t> ignore_mcu_update_on_datapoints_{};
   std::vector<DreoCommand> command_queue_;
   optional<DreoCommandType> expected_response_{};
+  CallbackManager<void(const std::vector<uint8_t> &)> report_callback_{};
   CallbackManager<void()> initialized_callback_{};
   CallbackManager<void()> module_reset_request_callback_{};
   CallbackManager<void(DreoButtonEvent)> button_event_callback_{};
@@ -220,6 +235,7 @@ class Dreo final : public Component, public uart::UARTDevice {
   uint32_t command_spacing_{DEFAULT_COMMAND_SPACING_MS};
   uint8_t wifi_status_second_byte_{DEFAULT_WIFI_STATUS_SECOND_BYTE};
   bool acknowledge_reports_{false};
+  uint8_t enum_command_type_{DEFAULT_ENUM_COMMAND_TYPE};
   std::vector<std::pair<uint8_t, uint8_t>> integer_command_widths_{};
   bool allow_sub_entity_control_while_off_{false};
   std::function<bool(const DreoDatapointCommand &)> command_authorizer_{};

@@ -1,0 +1,9 @@
+packages:
+  base: !include hpf007s-package-valid.yaml
+
+number:
+  - platform: dreo_hpf007s
+    dreo_hpf007s_id: hpf007s_coordinator
+    name: Bad Number
+    axis: vertical
+    curve_block: 2

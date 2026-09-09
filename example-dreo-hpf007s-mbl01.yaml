@@ -1,0 +1,66 @@
+# Dreo DR-HPF007S on its original MBL01 module. Compile-tested only; not yet
+# installed on a fan. The product map is packages/dreo-hpf007s.yaml.
+esphome:
+  name: dreo-hpf007s-mbl01
+  friendly_name: "Dreo DR-HPF007S MBL01"
+  platformio_options:
+    # The stock bootloader's partition table on this module matches the
+    # DR-HEC005S's: application at 0x010000, length 0x110000. Read from the
+    # compiled table, not inferred from populated flash.
+    board_build.bkrbl_size_app: "0x110000"
+
+external_components:
+  - source: components
+
+bk72xx:
+  board: generic-bk7231n-qfn32
+
+logger:
+
+api:
+  id: api_server
+  encryption:
+    key: !secret dreo_hpf007s_api_key
+
+ota:
+  - platform: esphome
+    password: !secret dreo_hpf007s_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: !secret dreo_hpf007s_fallback_ssid
+    password: !secret dreo_hpf007s_fallback_password
+  # The coordinator derives the module-status frame the panel's Wi-Fi icon
+  # follows: flashing after five seconds without Wi-Fi, off while connected
+  # without a state-subscribing API client, solid while one is connected.
+  on_connect:
+    then:
+      - lambda: id(hpf007s_coordinator).set_wifi_connected(true);
+  on_disconnect:
+    then:
+      - lambda: id(hpf007s_coordinator).set_wifi_connected(false);
+
+captive_portal:
+
+uart:
+  id: mcu_uart
+  tx_pin: TX1
+  rx_pin: RX1
+  baud_rate: 115200
+
+packages:
+  product: !include packages/dreo-hpf007s.yaml
+
+binary_sensor:
+  - platform: template
+    id: api_state_subscriber_connected
+    internal: true
+    trigger_on_initial_state: true
+    lambda: return id(api_server).is_connected_with_state_subscription();
+    filters:
+      - delayed_on: 1s
+    on_state:
+      then:
+        - lambda: id(hpf007s_coordinator).set_state_subscriber_connected(x);

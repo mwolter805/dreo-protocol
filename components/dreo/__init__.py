@@ -13,6 +13,7 @@ CONF_COMMAND_DATAPOINT_MARKER = "command_datapoint_marker"
 CONF_COMMAND_SPACING = "command_spacing"
 CONF_WIFI_STATUS_SECOND_BYTE = "wifi_status_second_byte"
 CONF_ACKNOWLEDGE_REPORTS = "acknowledge_reports"
+CONF_ENUM_COMMAND_TYPE = "enum_command_type"
 CONF_INTEGER_COMMAND_WIDTHS = "integer_command_widths"
 CONF_ALLOW_SUB_ENTITY_CONTROL_WHILE_OFF = "allow_sub_entity_control_while_off"
 CONF_COMMAND_AUTHORIZER = "command_authorizer"
@@ -101,6 +102,12 @@ CONFIG_SCHEMA = (
             # the historical zero byte.
             cv.Optional(CONF_WIFI_STATUS_SECOND_BYTE, default=0): cv.uint8_t,
             cv.Optional(CONF_ACKNOWLEDGE_REPORTS, default=False): cv.boolean,
+            # Type byte written for enum datapoint commands. The default keeps
+            # the reported enum type; a product whose stock bridge wrote its
+            # enum datapoints with the integer type byte selects "int".
+            cv.Optional(CONF_ENUM_COMMAND_TYPE, default="enum"): cv.one_of(
+                "enum", "int", lower=True
+            ),
             cv.Optional(CONF_INTEGER_COMMAND_WIDTHS, default={}): cv.Schema(
                 {cv.uint8_t: cv.one_of(1, 2, 4, int=True)}
             ),
@@ -151,6 +158,8 @@ async def to_code(config):
     cg.add(var.set_command_spacing(config[CONF_COMMAND_SPACING].total_milliseconds))
     cg.add(var.set_wifi_status_second_byte(config[CONF_WIFI_STATUS_SECOND_BYTE]))
     cg.add(var.set_acknowledge_reports(config[CONF_ACKNOWLEDGE_REPORTS]))
+    if config[CONF_ENUM_COMMAND_TYPE] == "int":
+        cg.add(var.set_enum_command_type(DreoDatapointType.INTEGER))
     for datapoint_id, width in config[CONF_INTEGER_COMMAND_WIDTHS].items():
         cg.add(var.set_integer_command_width(datapoint_id, width))
     cg.add(

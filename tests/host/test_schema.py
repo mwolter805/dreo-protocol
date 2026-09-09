@@ -78,5 +78,24 @@ class StringAdapterSchemaTest(SchemaTestBase):
         )
 
 
+class Hpf007sProductSchemaTest(SchemaTestBase):
+    """The hardware-free DR-HPF007S package and its product platforms."""
+
+    def test_package_validates(self):
+        self.expect_valid("hpf007s-package-valid.yaml")
+
+    def test_enum_command_type_is_bounded(self):
+        self.expect_rejected("hpf007s-enum-type-invalid.yaml", "enum_command_type")
+
+    def test_sweep_options_are_stock_widths(self):
+        self.expect_rejected("hpf007s-sweep-invalid.yaml", "not a stock sweep width")
+
+    def test_number_has_exactly_one_role(self):
+        self.expect_rejected("hpf007s-number-role-invalid.yaml", "axis")
+
+    def test_gradient_select_names_its_own_options(self):
+        self.expect_rejected("hpf007s-select-role-invalid.yaml", "options belong to a sweep select")
+
+
 if __name__ == "__main__":
     unittest.main()
